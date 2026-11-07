@@ -1,0 +1,15 @@
+{
+  "dependencies": [],
+  "content_type": "SCENERY",
+  "title": "ROAH NAHA",
+  "manufacturer": "",
+  "creator": "KAZE Kuro",
+  "package_version": "1.6.1",
+  "minimum_game_version": "1.33.8",
+  "release_notes": {
+    "neutral": {
+      "LastUpdate": "",
+      "OlderHistory": ""
+    }
+  }
+}
