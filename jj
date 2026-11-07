@@ -1,0 +1,113 @@
+"use strict";
+(async()=>{
+const C=window.Cesium,g=window.geofs;
+function wait(){return new Promise((resolve,reject)=>{let n=0;const t=setInterval(()=>{if(g?.api?.viewer&&C){clearInterval(t);resolve();}else if(++n>=120){clearInterval(t);reject(Error("GeoFS initialization timeout"));}},500);});}
+await wait();
+const viewer=g.api.viewer,scene=viewer.scene;
+const HF="https://huggingface.co/supermanone-boop/ITAMI/resolve/main/";
+const GH="https://raw.githubusercontent.com/supermanone-boop/model/main/";
+const KH="https://huggingface.co/supermanone-boop/kobe/resolve/main/";
+const RADIUS=10000,REFLECTION=.15,HIGHLIGHT=.08;
+const configs=[
+{name:"KADO1",url:HF+"kado_01.glb",lon:135.442825,lat:34.788936,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:2.065},
+{name:"KADO2",url:GH+"kado_02.glb",lon:135.437349,lat:34.793579,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:2.065},
+{name:"KADO4",url:GH+"kado_04.glb",lon:135.442945,lat:34.791555,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:2.065},
+{name:"ht",url:KH+"ht.glb",lon:136.807419,lat:34.860192,east:290,north:-195,height:2,scale:9,rz:-11,rx:0,ry:0,light:2.73,sampleTerrain:true},
+{name:"h",url:KH+"h.glb",lon:136.807419,lat:34.860192,east:737,north:351,height:2,scale:5,rz:-101,rx:0,ry:0,light:2.065,sampleTerrain:true},
+{name:"ht2",url:KH+"ht2.glb",lon:136.807419,lat:34.860192,east:619,north:119,height:2,scale:9.8,rz:-101.5,rx:0,ry:0,light:2.065,sampleTerrain:true},
+{name:"h051_terminal",url:KH+"h051_terminal_GeoFS.glb",lon:135.222751,lat:34.636090,east:768,north:200,height:2,scale:9.9,rz:85,rx:0,ry:0,light:2.065},
+{name:"t4",url:GH+"t4.glb",lon:137.189491,lat:36.643629,east:-293,north:72,height:-20,scale:4.9,rz:104,rx:0,ry:0,light:2.065,diffuse:2,specular:2,sampleTerrain:true}
+];
+window.__airportModels?.destroy?.();
+window.geofsNewHDState=true;
+if(window.jQuery)jQuery("body").trigger("terrainProviderWillUpdate");
+g.geoIpUpdate=function(){
+delete g.api.analytics;
+document.body.classList.add("geofs-hd");
+g.api.imageryProvider=new C.UrlTemplateImageryProvider({maximumLevel:21,hasAlphaChannel:false,subdomains:["mt0","mt1","mt2","mt3"],url:"https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"});
+g.api.setImageryProvider(g.api.imageryProvider,false);
+g.api.viewer.terrainProvider=g.api.flatRunwayTerrainProviderInstance=new g.api.FlatRunwayTerrainProvider({baseProvider:new C.CesiumTerrainProvider({url:"https://data.geo-fs.com/srtm/",requestWaterMask:false,requestVertexNormals:true}),bypass:false,maximumLevel:12});
+};
+g.geoIpUpdate();
+g.api.hdOn=window.geofsNewHDState;
+g.api.renderingQuality();
+if(window.jQuery)jQuery("body").trigger("terrainProviderUpdate");
+g.mapXYZ="https://data.geo-fs.com/osm/{z}/{x}/{y}.png";
+async function terrain(lon,lat){
+const cart=C.Cartographic.fromDegrees(lon,lat);
+try{
+const p=viewer.terrainProvider;
+if(p?.availability){
+const r=await C.sampleTerrainMostDetailed(p,[cart]);
+if(Number.isFinite(r[0]?.height))return r[0].height;
+}
+}catch(e){}
+const h=scene.globe.getHeight(cart);
+return Number.isFinite(h)?h:0;
+}
+function aircraftPosition(){
+const a=g.aircraft?.instance;
+if(!a)return null;
+const l=a.llaLocation;
+if(l){
+if(Array.isArray(l)&&Number.isFinite(l[0])&&Number.isFinite(l[1]))return{lat:l[0],lon:l[1]};
+if(Number.isFinite(l.lat)&&Number.isFinite(l.lon))return{lat:l.lat,lon:l.lon};
+if(Number.isFinite(l.latitude)&&Number.isFinite(l.longitude))return{lat:l.latitude,lon:l.longitude};
+}
+const p=a.position||a.model?.position;
+if(p&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&Number.isFinite(p.z)){
+const c=C.Cartographic.fromCartesian(p);
+if(c)return{lat:C.Math.toDegrees(c.latitude),lon:C.Math.toDegrees(c.longitude)};
+}
+return null;
+}
+function distance(a,b){
+const rad=x=>x*Math.PI/180;
+const dLat=rad(b.lat-a.lat),dLon=rad(b.lon-a.lon);
+const q=Math.sin(dLat/2)**2+Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLon/2)**2;
+return 6371000*2*Math.atan2(Math.sqrt(q),Math.sqrt(1-q));
+}
+const loaded=[];
+for(const cfg of configs){
+try{
+let lon=cfg.lon,lat=cfg.lat;
+if(cfg.east||cfg.north){
+lat+=cfg.north/110540;
+lon+=cfg.east/(111320*Math.cos(C.Math.toRadians(cfg.lat)));
+}
+const ground=cfg.sampleTerrain?await terrain(lon,lat):0;
+const position=C.Cartesian3.fromDegrees(lon,lat,ground+cfg.height);
+const hpr=new C.HeadingPitchRoll(C.Math.toRadians(cfg.rz),C.Math.toRadians(cfg.rx),C.Math.toRadians(cfg.ry));
+const rotation=C.Transforms.headingPitchRollQuaternion(position,hpr);
+const modelMatrix=C.Matrix4.fromTranslationQuaternionRotationScale(position,rotation,new C.Cartesian3(cfg.scale,cfg.scale,cfg.scale));
+const model=await C.Model.fromGltf({url:cfg.url,modelMatrix,scale:1});
+model.color=new C.Color(cfg.light,cfg.light,cfg.light,1);
+if(C.ModelColorBlendMode?.HIGHLIGHT!==undefined){
+model.colorBlendMode=C.ModelColorBlendMode.HIGHLIGHT;
+model.colorBlendAmount=HIGHLIGHT;
+}
+model.imageBasedLightingFactor=new C.Cartesian2(cfg.diffuse??1,cfg.specular??REFLECTION);
+model.show=false;
+scene.primitives.add(model);
+loaded.push({model,lat,lon,name:cfg.name});
+console.log("[AIRPORT] Loaded:",cfg.name);
+}catch(e){
+console.error("[AIRPORT] Failed:",cfg.name,e);
+}
+}
+function updateVisibility(){
+const pos=aircraftPosition();
+if(!pos)return;
+for(const item of loaded)item.model.show=distance(pos,item)<=RADIUS;
+}
+const removeListener=scene.preRender.addEventListener(updateVisibility);
+window.__airportModels={
+destroy(){
+removeListener();
+loaded.forEach(x=>scene.primitives.remove(x.model));
+loaded.length=0;
+}
+};
+scene.requestRender();
+console.log("[AIRPORT] All models loaded. 10km visibility enabled.");
+})().catch(e=>console.error("[AIRPORT SYSTEM ERROR]",e));
