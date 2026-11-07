@@ -1,0 +1,10 @@
+{
+  "package-name": "kaze_kuro-airport-roah-naha",
+  "items": [
+    {
+      "type": "Airport",
+      "content": "ROAH",
+      "revision": 1
+    }
+  ]
+}
