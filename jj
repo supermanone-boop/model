@@ -14,7 +14,7 @@ const configs=[
 {name:"KADO4",url:GH+"kado_04.glb",lon:135.442945,lat:34.791555,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:2.065},
 {name:"ht",url:KH+"ht.glb",lon:136.807419,lat:34.860192,east:290,north:-195,height:2,scale:9,rz:-11,rx:0,ry:0,light:2.73,sampleTerrain:true},
 {name:"h",url:KH+"h.glb",lon:136.807419,lat:34.860192,east:737,north:351,height:2,scale:5,rz:-101,rx:0,ry:0,light:3.565,sampleTerrain:true},
-{name:"ht2",url:KH+"ht2.glb",lon:136.807419,lat:34.860192,east:619,north:119,height:2,scale:9.8,rz:-101.5,rx:0,ry:0,light:3.5.65,sampleTerrain:true},
+{name:"ht2",url:KH+"ht2.glb",lon:136.807419,lat:34.860192,east:619,north:119,height:2,scale:9.8,rz:-101.5,rx:0,ry:0,light:3.565,sampleTerrain:true},
 {name:"h051_terminal",url:KH+"h051_terminal_GeoFS.glb",lon:135.222751,lat:34.636090,east:768,north:200,height:2,scale:9.9,rz:85,rx:0,ry:0,light:3.065},
 {name:"t4",url:GH+"t4.glb",lon:137.189491,lat:36.643629,east:-293,north:72,height:0,scale:4.9,rz:104,rx:0,ry:0,light:2.065,diffuse:2,specular:2,sampleTerrain:true},
 {name:"t2",url:GH+"t2.glb",lon:137.189491,lat:36.643629,east:-332,north:-102,height:0,scale:14,rz:194,rx:0,ry:0,light:3.265,diffuse:2,specular:2,sampleTerrain:true,localENU:true},
