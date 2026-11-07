@@ -16,8 +16,8 @@ const configs=[
 {name:"h",url:KH+"h.glb",lon:136.807419,lat:34.860192,east:737,north:351,height:2,scale:5,rz:-101,rx:0,ry:0,light:2.065,sampleTerrain:true},
 {name:"ht2",url:KH+"ht2.glb",lon:136.807419,lat:34.860192,east:619,north:119,height:2,scale:9.8,rz:-101.5,rx:0,ry:0,light:2.065,sampleTerrain:true},
 {name:"h051_terminal",url:KH+"h051_terminal_GeoFS.glb",lon:135.222751,lat:34.636090,east:768,north:200,height:2,scale:9.9,rz:85,rx:0,ry:0,light:2.065},
-{name:"t4",url:GH+"t4.glb",lon:137.189491,lat:36.643629,east:-293,north:72,height:2,scale:4.9,rz:104,rx:0,ry:0,light:2.065,diffuse:2,specular:2,sampleTerrain:true},
-{name:"t2",url:GH+"t2.glb",lon:137.189491,lat:36.643629,east:-332,north:-102,height:2,scale:14,rz:194,rx:0,ry:0,light:2.065,diffuse:2,specular:2,sampleTerrain:true,localENU:true}
+{name:"t4",url:GH+"t4.glb",lon:137.189491,lat:36.643629,east:-293,north:72,height:0,scale:4.9,rz:104,rx:0,ry:0,light:2.065,diffuse:2,specular:2,sampleTerrain:true},
+{name:"t2",url:GH+"t2.glb",lon:137.189491,lat:36.643629,east:-332,north:-102,height:0,scale:14,rz:194,rx:0,ry:0,light:2.065,diffuse:2,specular:2,sampleTerrain:true,localENU:true}
 ];
 window.__airportModels?.destroy?.();
 window.geofsNewHDState=true;
