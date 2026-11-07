@@ -1,0 +1,463 @@
+"use strict";
+
+(() => {
+
+    // ========================================
+    // ① 設定
+    // ========================================
+
+    const NAME = "KOBE_LINE_COLLISION";
+
+    const WIDTH = 20;       // 左右各20m
+    const STEP_HEIGHT = 0.5; // 段差0.5m
+
+    // [緯度, 経度, 高さ]
+    const POINTS = [
+        [34.63933020248638, 135.23293187330802, 0],
+        [34.641808145854675, 135.23264870059583, 14.5],
+        [34.64278930954994, 135.23250973561107, 14.5],
+        [34.64419756277958, 135.23209641915358, 14.5],
+        [34.64546829700706, 135.2314119251662, 14.5],
+        [34.65116143493393, 135.22814129122509, 14.5],
+        [34.65206507462092, 135.2275868870605, 0]
+    ];
+
+    // ========================================
+    // ② GeoFS初期化待ち
+    // ========================================
+
+    let tries = 0;
+
+    const timer = setInterval(() => {
+
+        const g = window.geofs;
+
+        if (
+            g?.api?.viewer &&
+            g?.objects?.objectList &&
+            typeof g.objects.loadModels === "function" &&
+            window.Cesium
+        ) {
+            clearInterval(timer);
+            build(g);
+
+        } else if (++tries >= 120) {
+
+            clearInterval(timer);
+            console.error("GeoFS initialization timeout");
+
+        }
+
+    }, 500);
+
+
+    // ========================================
+    // ③ 衝突オブジェクト生成
+    // ========================================
+
+    function build(g) {
+
+        if (window.__geoFSLineCollision) {
+            console.warn("Collision already exists");
+            return;
+        }
+
+        const R = 6378137;
+        const baseLat = POINTS[0][0];
+        const baseLon = POINTS[0][1];
+
+        const cosLat = Math.cos(baseLat * Math.PI / 180);
+
+        // 緯度経度 → ローカルENU座標
+        function toXY(p) {
+
+            return [
+                (p[1] - baseLon) *
+                Math.PI / 180 * R * cosLat,
+
+                (p[0] - baseLat) *
+                Math.PI / 180 * R
+            ];
+        }
+
+        const path = POINTS.map(p => ({
+            xy: toXY(p),
+            z: p[2]
+        }));
+
+
+        // ========================================
+        // ④ 各区間の方向と垂直ベクトル
+        // ========================================
+
+        const directions = [];
+        const normals = [];
+
+        for (let i = 0; i < path.length - 1; i++) {
+
+            const dx = path[i + 1].xy[0] - path[i].xy[0];
+            const dy = path[i + 1].xy[1] - path[i].xy[1];
+
+            const len = Math.hypot(dx, dy);
+
+            if (len < 0.001) {
+                throw new Error("Duplicate path points");
+            }
+
+            const d = [dx / len, dy / len];
+
+            directions.push(d);
+
+            // 左側の法線
+            normals.push([-d[1], d[0]]);
+        }
+
+
+        // ========================================
+        // ⑤ マイター接続
+        // ========================================
+
+        const offsets = [];
+
+        for (let i = 0; i < path.length; i++) {
+
+            let nx, ny;
+
+            if (i === 0) {
+
+                [nx, ny] = normals[0];
+
+            } else if (i === path.length - 1) {
+
+                [nx, ny] = normals[normals.length - 1];
+
+            } else {
+
+                nx = normals[i - 1][0] + normals[i][0];
+                ny = normals[i - 1][1] + normals[i][1];
+
+                const len = Math.hypot(nx, ny);
+
+                if (len < 0.001) {
+                    [nx, ny] = normals[i];
+                } else {
+                    nx /= len;
+                    ny /= len;
+                }
+            }
+
+            const dot =
+                nx * normals[Math.min(i, normals.length - 1)][0] +
+                ny * normals[Math.min(i, normals.length - 1)][1];
+
+            let factor = WIDTH / dot;
+
+            // 極端な角度での突出を制限
+            factor = Math.max(-WIDTH * 4,
+                     Math.min(WIDTH * 4, factor));
+
+            offsets.push([
+                nx * factor,
+                ny * factor
+            ]);
+        }
+
+
+        // ========================================
+        // ⑥ 左右の断面を作成
+        // ========================================
+
+        const sections = path.map((p, i) => {
+
+            const ox = offsets[i][0];
+            const oy = offsets[i][1];
+
+            return {
+
+                L: [
+                    p.xy[0] + ox,
+                    p.xy[1] + oy
+                ],
+
+                R: [
+                    p.xy[0] - ox,
+                    p.xy[1] - oy
+                ],
+
+                z: p.z
+            };
+
+        });
+
+
+        // ========================================
+        // ⑦ Triangle生成
+        // ========================================
+
+        const collisionTriangles = [];
+
+        function tri(p0, p1, p2) {
+
+            const u = [
+                p1[0] - p0[0],
+                p1[1] - p0[1],
+                p1[2] - p0[2]
+            ];
+
+            const v = [
+                p2[0] - p0[0],
+                p2[1] - p0[1],
+                p2[2] - p0[2]
+            ];
+
+            const n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0]
+            ];
+
+            collisionTriangles.push(
+                Object.assign([p0, p1, p2], { u, v, n })
+            );
+        }
+
+
+        // ========================================
+        // ⑧ 水平面の四角形
+        // ========================================
+
+        function addTop(a, b, z) {
+
+            const p0 = [a.L[0], a.L[1], z];
+            const p1 = [a.R[0], a.R[1], z];
+            const p2 = [b.R[0], b.R[1], z];
+            const p3 = [b.L[0], b.L[1], z];
+
+            tri(p0, p1, p2);
+            tri(p0, p2, p3);
+        }
+
+
+        // ========================================
+        // ⑨ 垂直段差の四角形
+        // ========================================
+
+        function addRiser(s, low, high) {
+
+            const p0 = [s.L[0], s.L[1], low];
+            const p1 = [s.R[0], s.R[1], low];
+            const p2 = [s.R[0], s.R[1], high];
+            const p3 = [s.L[0], s.L[1], high];
+
+            tri(p0, p1, p2);
+            tri(p0, p2, p3);
+        }
+
+
+        // ========================================
+        // ⑩ 断面の補間
+        // ========================================
+
+        function interpolate(a, b, t) {
+
+            function lerp(x, y) {
+                return x + (y - x) * t;
+            }
+
+            return {
+
+                L: [
+                    lerp(a.L[0], b.L[0]),
+                    lerp(a.L[1], b.L[1])
+                ],
+
+                R: [
+                    lerp(a.R[0], b.R[0]),
+                    lerp(a.R[1], b.R[1])
+                ]
+
+            };
+        }
+
+
+        // ========================================
+        // ⑪ 全区間の三角形を生成
+        // ========================================
+
+        for (let i = 0; i < sections.length - 1; i++) {
+
+            const a = sections[i];
+            const b = sections[i + 1];
+
+            const delta = b.z - a.z;
+
+            // 高さが同じ区間
+            if (Math.abs(delta) < 0.001) {
+
+                addTop(a, b, a.z);
+
+                continue;
+            }
+
+            // 0.5m単位の階段
+            const count = Math.max(
+                1,
+                Math.round(Math.abs(delta) / STEP_HEIGHT)
+            );
+
+            const step = delta / count;
+
+            for (let k = 0; k < count; k++) {
+
+                const t0 = k / count;
+                const t1 = (k + 1) / count;
+
+                const s0 = interpolate(a, b, t0);
+                const s1 = interpolate(a, b, t1);
+
+                const z = a.z + step * k;
+                const nextZ = z + step;
+
+                // 水平の踏面
+                addTop(s0, s1, z);
+
+                // 垂直の段差面
+                const low = Math.min(z, nextZ);
+                const high = Math.max(z, nextZ);
+
+                addRiser(s1, low, high);
+            }
+        }
+
+
+        // ========================================
+        // ⑫ Collision Radius自動計算
+        // ========================================
+
+        let maxRadius = 0;
+
+        for (const s of sections) {
+
+            maxRadius = Math.max(
+                maxRadius,
+                Math.hypot(s.L[0], s.L[1]),
+                Math.hypot(s.R[0], s.R[1])
+            );
+        }
+
+
+        // ========================================
+        // ⑬ 空のGLBを生成
+        // モデルを表示せず衝突データを登録するため
+        // ========================================
+
+        function makeEmptyGLB() {
+
+            const json = new TextEncoder().encode(
+                JSON.stringify({
+
+                    asset: {
+                        version: "2.0",
+                        generator: "GeoFS collision-only"
+                    },
+
+                    scene: 0,
+                    scenes: [{ nodes: [] }],
+                    nodes: []
+
+                })
+            );
+
+            const padded = Math.ceil(json.length / 4) * 4;
+            const total = 20 + padded;
+
+            const buffer = new ArrayBuffer(total);
+            const view = new DataView(buffer);
+
+            view.setUint32(0, 0x46546C67, true);
+            view.setUint32(4, 2, true);
+            view.setUint32(8, total, true);
+
+            view.setUint32(12, padded, true);
+            view.setUint32(16, 0x4E4F534A, true);
+
+            new Uint8Array(buffer, 20, json.length)
+                .set(json);
+
+            new Uint8Array(
+                buffer,
+                20 + json.length,
+                padded - json.length
+            ).fill(0x20);
+
+            return URL.createObjectURL(
+                new Blob([buffer], {
+                    type: "model/gltf-binary"
+                })
+            );
+        }
+
+        const invisibleURL = makeEmptyGLB();
+
+
+        // ========================================
+        // ⑭ GeoFS Collision Object
+        // ========================================
+
+        const obj = {
+
+            name: NAME,
+
+            type: 100,
+
+            url: invisibleURL,
+
+            location: [
+                baseLat,
+                baseLon,
+                0
+            ],
+
+            htr: [0, 0, 0],
+
+            rotateModelOnly: false,
+
+            scale: 1,
+
+            metricOffset: [0, 0, 0],
+
+            collisionRadius: Math.ceil(maxRadius + 20),
+
+            collisionTriangles,
+
+            options: {}
+
+        };
+
+
+        // ========================================
+        // ⑮ 登録
+        // ========================================
+
+        g.objects.objectList.push(obj);
+
+        window.__geoFSLineCollision = obj;
+
+        window.__geoFSLineCollisionURL = invisibleURL;
+
+        g.objects.loadModels();
+
+        console.log(
+            "[LINE COLLISION] Registered",
+            {
+                points: POINTS.length,
+                width: WIDTH * 2,
+                stepHeight: STEP_HEIGHT,
+                triangles: collisionTriangles.length,
+                radius: obj.collisionRadius
+            }
+        );
+
+    }
+
+})();
