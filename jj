@@ -9,9 +9,9 @@ const GH="https://raw.githubusercontent.com/supermanone-boop/model/main/";
 const KH="https://huggingface.co/supermanone-boop/kobe/resolve/main/";
 const RADIUS=10000,REFLECTION=.15,HIGHLIGHT=.08;
 const configs=[
-{name:"KADO1",url:HF+"kado_01.glb",lon:135.442825,lat:34.788936,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:2.065},
-{name:"KADO2",url:GH+"kado_02.glb",lon:135.437349,lat:34.793579,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:2.065},
-{name:"KADO4",url:GH+"kado_04.glb",lon:135.442945,lat:34.791555,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:2.065},
+{name:"KADO1",url:HF+"kado_01.glb",lon:135.442825,lat:34.788936,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:3.065},
+{name:"KADO2",url:GH+"kado_02.glb",lon:135.437349,lat:34.793579,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:3.065},
+{name:"KADO4",url:GH+"kado_04.glb",lon:135.442945,lat:34.791555,height:8.888973662526322,scale:9.9,rx:0,ry:0,rz:-135,light:3.065},
 {name:"ht",url:KH+"ht.glb",lon:136.807419,lat:34.860192,east:290,north:-195,height:2,scale:9,rz:-11,rx:0,ry:0,light:2.73,sampleTerrain:true},
 {name:"h",url:KH+"h.glb",lon:136.807419,lat:34.860192,east:737,north:351,height:2,scale:5,rz:-101,rx:0,ry:0,light:2.565,sampleTerrain:true},
 {name:"ht2",url:KH+"ht2.glb",lon:136.807419,lat:34.860192,east:619,north:119,height:2,scale:9.8,rz:-101.5,rx:0,ry:0,light:3.565,sampleTerrain:true},
