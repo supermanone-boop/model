@@ -16,7 +16,8 @@ const configs=[
 {name:"h",url:KH+"h.glb",lon:136.807419,lat:34.860192,east:737,north:351,height:2,scale:5,rz:-101,rx:0,ry:0,light:2.065,sampleTerrain:true},
 {name:"ht2",url:KH+"ht2.glb",lon:136.807419,lat:34.860192,east:619,north:119,height:2,scale:9.8,rz:-101.5,rx:0,ry:0,light:2.065,sampleTerrain:true},
 {name:"h051_terminal",url:KH+"h051_terminal_GeoFS.glb",lon:135.222751,lat:34.636090,east:768,north:200,height:2,scale:9.9,rz:85,rx:0,ry:0,light:2.065},
-{name:"t4",url:GH+"t4.glb",lon:137.189491,lat:36.643629,east:-293,north:72,height:-20,scale:4.9,rz:104,rx:0,ry:0,light:2.065,diffuse:2,specular:2,sampleTerrain:true}
+{name:"t4",url:GH+"t4.glb",lon:137.189491,lat:36.643629,east:-293,north:72,height:2,scale:4.9,rz:104,rx:0,ry:0,light:2.065,diffuse:2,specular:2,sampleTerrain:true},
+{name:"t2",url:GH+"t2.glb",lon:137.189491,lat:36.643629,east:-332,north:-102,height:2,scale:14,rz:194,rx:0,ry:0,light:2.065,diffuse:2,specular:2,sampleTerrain:true,localENU:true}
 ];
 window.__airportModels?.destroy?.();
 window.geofsNewHDState=true;
@@ -45,6 +46,22 @@ if(Number.isFinite(r[0]?.height))return r[0].height;
 const h=scene.globe.getHeight(cart);
 return Number.isFinite(h)?h:0;
 }
+function resolveCoordinates(cfg){
+if(cfg.localENU){
+const origin=C.Cartesian3.fromDegrees(cfg.lon,cfg.lat,0);
+const frame=C.Transforms.eastNorthUpToFixedFrame(origin);
+const local=new C.Cartesian3(cfg.east||0,cfg.north||0,0);
+const horizontal=C.Matrix4.multiplyByPoint(frame,local,new C.Cartesian3());
+const carto=C.Cartographic.fromCartesian(horizontal);
+return{lon:C.Math.toDegrees(carto.longitude),lat:C.Math.toDegrees(carto.latitude)};
+}
+let lon=cfg.lon,lat=cfg.lat;
+if(cfg.east||cfg.north){
+lat+=(cfg.north||0)/110540;
+lon+=(cfg.east||0)/(111320*Math.cos(C.Math.toRadians(cfg.lat)));
+}
+return{lon,lat};
+}
 function aircraftPosition(){
 const a=g.aircraft?.instance;
 if(!a)return null;
@@ -70,13 +87,9 @@ return 6371000*2*Math.atan2(Math.sqrt(q),Math.sqrt(1-q));
 const loaded=[];
 for(const cfg of configs){
 try{
-let lon=cfg.lon,lat=cfg.lat;
-if(cfg.east||cfg.north){
-lat+=cfg.north/110540;
-lon+=cfg.east/(111320*Math.cos(C.Math.toRadians(cfg.lat)));
-}
-const ground=cfg.sampleTerrain?await terrain(lon,lat):0;
-const position=C.Cartesian3.fromDegrees(lon,lat,ground+cfg.height);
+const coords=resolveCoordinates(cfg);
+const ground=cfg.sampleTerrain?await terrain(coords.lon,coords.lat):0;
+const position=C.Cartesian3.fromDegrees(coords.lon,coords.lat,ground+cfg.height);
 const hpr=new C.HeadingPitchRoll(C.Math.toRadians(cfg.rz),C.Math.toRadians(cfg.rx),C.Math.toRadians(cfg.ry));
 const rotation=C.Transforms.headingPitchRollQuaternion(position,hpr);
 const modelMatrix=C.Matrix4.fromTranslationQuaternionRotationScale(position,rotation,new C.Cartesian3(cfg.scale,cfg.scale,cfg.scale));
@@ -89,7 +102,7 @@ model.colorBlendAmount=HIGHLIGHT;
 model.imageBasedLightingFactor=new C.Cartesian2(cfg.diffuse??1,cfg.specular??REFLECTION);
 model.show=false;
 scene.primitives.add(model);
-loaded.push({model,lat,lon,name:cfg.name});
+loaded.push({model,lat:coords.lat,lon:coords.lon,name:cfg.name});
 console.log("[AIRPORT] Loaded:",cfg.name);
 }catch(e){
 console.error("[AIRPORT] Failed:",cfg.name,e);
@@ -102,10 +115,12 @@ for(const item of loaded)item.model.show=distance(pos,item)<=RADIUS;
 }
 const removeListener=scene.preRender.addEventListener(updateVisibility);
 window.__airportModels={
+items:loaded,
 destroy(){
 removeListener();
 loaded.forEach(x=>scene.primitives.remove(x.model));
 loaded.length=0;
+console.log("[AIRPORT] All models removed");
 }
 };
 scene.requestRender();
