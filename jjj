@@ -1,0 +1,266 @@
+
+"use strict";
+
+(async()=>{
+const C=window.Cesium;
+const g=window.geofs;
+
+if(!C||!g?.api?.viewer){
+alert("GeoFSが読み込まれていません");
+return;
+}
+
+window.__aircraftFleet13?.destroy?.();
+
+const viewer=g.api.viewer;
+const scene=viewer.scene;
+
+const BASE="https://raw.githubusercontent.com/supermanone-boop/model/main/";
+const BASE_LON=135.436842;
+const BASE_LAT=34.791936;
+
+let destroyed=false;
+const primitives=[];
+
+const DEFAULT={
+scale:1,
+rx:0,
+ry:0,
+light:2.065,
+diffuse:2,
+specular:2
+};
+
+const items=[
+{
+file:"J-AIR_Embraer190.glb",
+name:"J-AIR E190 01",
+east:22,north:90,height:2,rz:158,
+...DEFAULT
+},
+{
+file:"J-AIR_Embraer190.glb",
+name:"J-AIR E190 02",
+east:138,north:150,height:2,rz:134,
+...DEFAULT
+},
+{
+file:"J-AIR_Embraer190.glb",
+name:"J-AIR E190 03",
+east:155,north:210,height:2,rz:93,
+...DEFAULT
+},
+{
+file:"J-AIR_Embraer190.glb",
+name:"J-AIR E190 04",
+east:62,north:328,height:2,rz:47,
+...DEFAULT
+},
+{
+file:"J-AIR_Embraer190.glb",
+name:"J-AIR E190 05",
+east:-32,north:31,height:2,rz:180,
+...DEFAULT
+},
+{
+file:"JAL_787-9.glb",
+name:"JAL 787-9",
+east:146,north:-23,height:3,rz:32,
+...DEFAULT
+},
+{
+file:"JTA_737-800_Jinbei.glb",
+name:"JTA Jinbei 737-800",
+east:64,north:-28,height:3.5,rz:46,
+...DEFAULT,
+ry:-360,
+light:1.47
+},
+{
+file:"J-AIR_Embraer190.glb",
+name:"J-AIR E190 06",
+east:-56,north:305,height:2,rz:132,
+...DEFAULT
+},
+{
+file:"J-AIR_Embraer190.glb",
+name:"J-AIR E190 07",
+east:-22,north:340,height:2,rz:132,
+...DEFAULT
+},
+{
+file:"J-AIR_Embraer190.glb",
+name:"J-AIR E190 08",
+east:-87,north:265,height:2,rz:132,
+...DEFAULT
+},
+{
+file:"ATR42_Japan_Air_Commuter_JA04JC.glb",
+name:"Japan Air Commuter ATR42",
+east:-43,north:215,height:2.5,rz:83,
+...DEFAULT
+},
+{
+file:"B777-300_JAL_Tsurumaru.glb",
+name:"JAL 777-300 Tsurumaru",
+east:200,north:-85,height:3,rz:66,
+...DEFAULT
+},
+{
+file:"B777-300_ANA.glb",
+name:"ANA 777-300",
+east:546,north:-420,height:2,rz:70,
+...DEFAULT
+}
+];
+
+function getPosition(s){
+const origin=C.Cartesian3.fromDegrees(
+BASE_LON,BASE_LAT,0
+);
+
+const frame=C.Transforms.eastNorthUpToFixedFrame(origin);
+
+const local=new C.Cartesian3(
+s.east,s.north,0
+);
+
+const horizontal=C.Matrix4.multiplyByPoint(
+frame,local,new C.Cartesian3()
+);
+
+const carto=C.Cartographic.fromCartesian(horizontal);
+
+let terrain=scene.globe.getHeight(carto);
+if(!Number.isFinite(terrain))terrain=0;
+
+return C.Cartesian3.fromRadians(
+carto.longitude,
+carto.latitude,
+terrain+s.height
+);
+}
+
+function updateModel(item){
+if(!item.model||destroyed)return;
+
+const pos=getPosition(item);
+
+const hpr=new C.HeadingPitchRoll(
+C.Math.toRadians(item.rz),
+C.Math.toRadians(item.rx),
+C.Math.toRadians(item.ry)
+);
+
+item.model.modelMatrix=
+C.Transforms.headingPitchRollToFixedFrame(
+pos,
+hpr,
+C.Ellipsoid.WGS84,
+C.Transforms.eastNorthUpToFixedFrame
+);
+
+item.model.scale=item.scale;
+
+item.model.color=new C.Color(
+item.light,item.light,item.light,1
+);
+
+item.model.imageBasedLightingFactor=
+new C.Cartesian2(item.diffuse,item.specular);
+}
+
+async function loadItem(item,index){
+
+if(destroyed)return;
+
+console.log(
+`[${index+1}/${items.length}] 読み込み: ${item.name}`
+);
+
+try{
+
+const model=C.Model.fromGltf({
+url:BASE+item.file,
+modelMatrix:C.Matrix4.IDENTITY,
+scale:item.scale
+});
+
+item.model=scene.primitives.add(model);
+item.model.show=false;
+primitives.push(model);
+
+if(model.readyPromise&&typeof model.readyPromise.then==="function"){
+await model.readyPromise;
+}
+
+if(destroyed){
+scene.primitives.remove(model);
+return;
+}
+
+updateModel(item);
+model.show=true;
+item.loaded=true;
+
+console.log("配置完了:",item.name);
+
+}catch(e){
+
+item.error=true;
+
+if(item.model){
+scene.primitives.remove(item.model);
+item.model=null;
+}
+
+console.error("読み込み失敗:",item.name,item.file,e);
+}
+}
+
+const fleet={
+items,
+
+destroy(){
+destroyed=true;
+
+primitives.forEach(model=>{
+try{
+scene.primitives.remove(model);
+}catch(e){}
+});
+
+primitives.length=0;
+
+console.log("13機すべて削除しました");
+},
+
+async reload(){
+this.destroy();
+},
+
+get loadedCount(){
+return items.filter(x=>x.loaded).length;
+}
+};
+
+window.__aircraftFleet13=fleet;
+
+console.log("================================");
+console.log("AIRCRAFT FLEET 13");
+console.log("基準座標:",BASE_LAT,BASE_LON);
+console.log("登録機体:",items.length);
+console.log("================================");
+
+for(let i=0;i<items.length;i++){
+if(destroyed)break;
+await loadItem(items[i],i);
+}
+
+console.log("================================");
+console.log("読み込み終了");
+console.log("成功:",items.filter(x=>x.loaded).length);
+console.log("失敗:",items.filter(x=>x.error).length);
+console.log("================================");
+
+})();
