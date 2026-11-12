@@ -1,0 +1,538 @@
+
+"use strict";
+(()=>{
+const C=window.Cesium,g=window.geofs;
+if(!C||!g?.api?.viewer){
+alert("GeoFSが読み込まれていません");
+return;
+}
+
+window.__multiGLBEditor?.destroy?.();
+
+const viewer=g.api.viewer,scene=viewer.scene;
+const BASE="https://raw.githubusercontent.com/supermanone-boop/model/main/";
+
+const BASE_LON=135.436842;
+const BASE_LAT=34.791936;
+
+let maxRadius=2000;
+let selected=0;
+let destroyed=false;
+
+const DEFAULT={
+east:0,
+north:0,
+height:2,
+scale:9.9,
+rz:85,
+rx:0,
+ry:0,
+light:2.065,
+diffuse:2,
+specular:2
+};
+
+const files=[
+{file:"ANA_737-800.glb",name:"ANA Boeing 737-800"},
+{file:"J-AIR_Embraer190.glb",name:"J-AIR Embraer 190"},
+{file:"JAL_787-9.glb",name:"JAL Boeing 787-9"},
+{file:"JAL_737-800.glb",name:"JAL Boeing 737-800"},
+{file:"JTA_737-800_Jinbei.glb",name:"JTA Jinbei Jet 737-800"},
+{file:"ATR42_Japan_Air_Commuter_JA04JC.glb",name:"Japan Air Commuter ATR42"},
+{file:"B777-300_JAL_Tsurumaru.glb",name:"JAL Boeing 777-300 Tsurumaru"},
+{file:"B777-300_ANA.glb",name:"ANA Boeing 777-300"}
+];
+
+const items=files.map(x=>({
+...x,
+settings:{...DEFAULT},
+model:null,
+loading:false,
+loaded:false,
+error:false
+}));
+
+const fields=[
+["east","東西",-maxRadius,maxRadius,1],
+["north","南北",-maxRadius,maxRadius,1],
+["height","高さ",-500,500,0.1],
+["scale","スケール",0.01,100,0.01],
+["rz","Z回転",-360,360,1],
+["rx","X回転",-360,360,1],
+["ry","Y回転",-360,360,1],
+["light","明るさ",0,5,0.01],
+["diffuse","Diffuse",0,5,0.01],
+["specular","Specular",0,5,0.01]
+];
+
+function clampPosition(s){
+const d=Math.hypot(s.east,s.north);
+if(d>maxRadius){
+const k=maxRadius/d;
+s.east*=k;
+s.north*=k;
+}
+}
+
+function getPosition(s){
+const origin=C.Cartesian3.fromDegrees(
+BASE_LON,BASE_LAT,0
+);
+
+const frame=C.Transforms.eastNorthUpToFixedFrame(origin);
+const local=new C.Cartesian3(s.east,s.north,0);
+
+const horizontal=C.Matrix4.multiplyByPoint(
+frame,local,new C.Cartesian3()
+);
+
+const carto=C.Cartographic.fromCartesian(horizontal);
+
+let terrain=scene.globe.getHeight(carto);
+if(!Number.isFinite(terrain))terrain=0;
+
+return C.Cartesian3.fromRadians(
+carto.longitude,
+carto.latitude,
+terrain+s.height
+);
+}
+
+function updateModel(item){
+if(!item.model||destroyed)return;
+
+const s=item.settings;
+
+try{
+const pos=getPosition(s);
+
+const hpr=new C.HeadingPitchRoll(
+C.Math.toRadians(s.rz),
+C.Math.toRadians(s.rx),
+C.Math.toRadians(s.ry)
+);
+
+item.model.modelMatrix=
+C.Transforms.headingPitchRollToFixedFrame(
+pos,
+hpr,
+C.Ellipsoid.WGS84,
+C.Transforms.eastNorthUpToFixedFrame
+);
+
+item.model.scale=s.scale;
+
+item.model.color=new C.Color(
+s.light,s.light,s.light,1
+);
+
+item.model.imageBasedLightingFactor=
+new C.Cartesian2(s.diffuse,s.specular);
+
+}catch(e){
+console.error("モデル更新エラー:",item.file,e);
+}
+}
+
+function refreshStatus(){
+if(!status)return;
+
+const item=items[selected];
+
+status.textContent=
+item.error?"読み込みエラー":
+item.loaded?"読み込み完了":
+item.loading?"読み込み中":
+"未読み込み";
+}
+
+function loadOne(item){
+if(destroyed||item.loading||item.loaded||item.error)return;
+
+item.loading=true;
+refreshStatus();
+
+try{
+clampPosition(item.settings);
+
+const model=C.Model.fromGltf({
+url:BASE+item.file,
+modelMatrix:C.Matrix4.IDENTITY,
+scale:item.settings.scale
+});
+
+item.model=scene.primitives.add(model);
+item.model.show=false;
+
+const ready=item.model.readyPromise;
+
+if(ready&&typeof ready.then==="function"){
+
+ready.then(()=>{
+if(destroyed)return;
+
+item.loaded=true;
+item.loading=false;
+
+updateModel(item);
+
+item.model.show=items[selected]===item;
+
+refreshStatus();
+
+}).catch(e=>{
+
+item.loading=false;
+item.error=true;
+
+if(item.model){
+scene.primitives.remove(item.model);
+item.model=null;
+}
+
+console.error("GLB読み込み失敗:",item.file,e);
+refreshStatus();
+
+});
+
+}else{
+
+item.loaded=true;
+item.loading=false;
+
+updateModel(item);
+
+item.model.show=items[selected]===item;
+
+refreshStatus();
+}
+
+}catch(e){
+
+item.loading=false;
+item.error=true;
+
+if(item.model){
+scene.primitives.remove(item.model);
+item.model=null;
+}
+
+console.error("GLB生成失敗:",item.file,e);
+refreshStatus();
+}
+}
+
+function showSelected(){
+
+items.forEach((item,i)=>{
+if(item.model){
+item.model.show=
+i===selected&&
+item.loaded===true&&
+!item.error;
+}
+});
+
+const current=items[selected];
+
+if(current&&!current.model&&!current.loading&&!current.error){
+loadOne(current);
+}
+
+refreshStatus();
+}
+
+const old=document.getElementById("multiGLBEditor");
+if(old)old.remove();
+
+const oldButton=document.getElementById("multiGLBEditorOpen");
+if(oldButton)oldButton.remove();
+
+const panel=document.createElement("div");
+
+panel.id="multiGLBEditor";
+
+panel.style.cssText=
+"position:fixed;top:55px;left:10px;z-index:999999;"+
+"background:rgba(15,18,25,.96);color:white;padding:12px;"+
+"border:1px solid #666;border-radius:8px;width:310px;"+
+"max-height:85vh;overflow-y:auto;"+
+"font:13px Arial,sans-serif;box-sizing:border-box;";
+
+panel.innerHTML=`
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+<b style="font-size:15px">Aircraft Multi GLB Editor</b>
+<button id="mgClose">閉じる</button>
+</div>
+
+<div style="margin-bottom:8px">
+機体選択
+<select id="mgSelect" style="width:100%;padding:6px;margin-top:4px">
+${files.map((x,i)=>
+`<option value="${i}">${x.name}</option>`
+).join("")}
+</select>
+</div>
+
+<div id="mgStatus" style="margin-bottom:9px;color:#9ed0ff">
+未読み込み
+</div>
+
+<div style="margin-bottom:10px">
+半径制限 (m)
+<input id="mgRadius" type="number" min="1" max="100000"
+step="1" value="2000"
+style="width:100%;box-sizing:border-box;padding:5px;margin-top:4px">
+</div>
+
+<div id="mgFields"></div>
+
+<div style="display:flex;gap:5px;margin-top:12px">
+<button id="mgReset" style="flex:1">リセット</button>
+<button id="mgCopy" style="flex:1">設定コピー</button>
+</div>
+
+<div style="margin-top:8px;font-size:11px;color:#aaa">
+基準座標: ${BASE_LAT}, ${BASE_LON}
+</div>
+
+<div style="margin-top:5px;font-size:11px;color:#aaa">
+登録機体数: ${files.length}
+</div>
+`;
+
+document.body.appendChild(panel);
+
+const status=panel.querySelector("#mgStatus");
+const select=panel.querySelector("#mgSelect");
+const fieldsBox=panel.querySelector("#mgFields");
+const radiusInput=panel.querySelector("#mgRadius");
+
+const openButton=document.createElement("button");
+
+openButton.id="multiGLBEditorOpen";
+openButton.textContent="Aircraft GLB Editor";
+
+openButton.style.cssText=
+"position:fixed;top:55px;left:10px;z-index:999998;"+
+"padding:8px 12px;background:#202733;color:white;"+
+"border:1px solid #777;border-radius:6px;display:none";
+
+document.body.appendChild(openButton);
+
+function createFields(){
+
+fieldsBox.innerHTML="";
+
+fields.forEach(([key,label,min,max,step])=>{
+
+const wrap=document.createElement("div");
+wrap.style.cssText=
+"margin:8px 0;padding-bottom:7px;border-bottom:1px solid #343943";
+
+const title=document.createElement("div");
+title.textContent=label;
+title.style.cssText="margin-bottom:4px";
+
+const row=document.createElement("div");
+row.style.cssText="display:flex;gap:6px;align-items:center";
+
+const range=document.createElement("input");
+range.type="range";
+range.min=min;
+range.max=max;
+range.step=step;
+range.style.cssText="flex:1;min-width:0";
+
+const number=document.createElement("input");
+number.type="number";
+number.min=min;
+number.max=max;
+number.step=step;
+number.style.cssText=
+"width:85px;box-sizing:border-box;padding:4px;"+
+"background:#fff;color:#111;border:0;border-radius:3px";
+
+range.dataset.key=key;
+number.dataset.key=key;
+
+range.addEventListener("input",()=>{
+changeField(key,Number(range.value));
+});
+
+number.addEventListener("change",()=>{
+changeField(key,Number(number.value));
+});
+
+row.append(range,number);
+wrap.append(title,row);
+fieldsBox.appendChild(wrap);
+
+});
+}
+
+function updateFields(){
+
+const s=items[selected].settings;
+
+fieldsBox.querySelectorAll("input").forEach(input=>{
+
+const key=input.dataset.key;
+
+if(key==="east"||key==="north"){
+input.min=-maxRadius;
+input.max=maxRadius;
+}
+
+input.value=s[key];
+
+});
+}
+
+function changeField(key,value){
+
+if(!Number.isFinite(value))return;
+
+const s=items[selected].settings;
+
+s[key]=value;
+
+if(key==="scale"&&s.scale<=0){
+s.scale=0.01;
+}
+
+clampPosition(s);
+
+updateFields();
+
+const item=items[selected];
+
+if(item.model&&item.loaded){
+updateModel(item);
+}
+}
+
+function setRadius(value){
+
+if(!Number.isFinite(value))return;
+
+maxRadius=Math.max(1,Math.min(100000,value));
+
+radiusInput.value=maxRadius;
+
+items.forEach(item=>{
+
+clampPosition(item.settings);
+
+if(item.model&&item.loaded){
+updateModel(item);
+}
+
+});
+
+updateFields();
+}
+
+select.addEventListener("change",()=>{
+
+selected=Number(select.value);
+
+showSelected();
+updateFields();
+
+});
+
+radiusInput.addEventListener("change",()=>{
+setRadius(Number(radiusInput.value));
+});
+
+panel.querySelector("#mgReset").addEventListener("click",()=>{
+
+items[selected].settings={...DEFAULT};
+
+clampPosition(items[selected].settings);
+
+updateFields();
+
+if(items[selected].model){
+updateModel(items[selected]);
+}
+
+});
+
+panel.querySelector("#mgCopy").addEventListener("click",()=>{
+
+const s=items[selected].settings;
+
+const output=JSON.stringify({
+file:items[selected].file,
+name:items[selected].name,
+settings:s
+},null,2);
+
+if(navigator.clipboard?.writeText){
+
+navigator.clipboard.writeText(output)
+.then(()=>status.textContent="設定をコピーしました")
+.catch(()=>window.prompt("設定をコピーしてください",output));
+
+}else{
+
+window.prompt("設定をコピーしてください",output);
+
+}
+
+});
+
+panel.querySelector("#mgClose").addEventListener("click",()=>{
+
+panel.style.display="none";
+openButton.style.display="block";
+
+});
+
+openButton.addEventListener("click",()=>{
+
+panel.style.display="block";
+openButton.style.display="none";
+
+});
+
+createFields();
+updateFields();
+
+window.__multiGLBEditor={
+
+destroy(){
+
+destroyed=true;
+
+items.forEach(item=>{
+
+if(item.model){
+scene.primitives.remove(item.model);
+item.model=null;
+}
+
+});
+
+panel.remove();
+openButton.remove();
+
+},
+
+items,
+
+get radius(){
+return maxRadius;
+},
+
+set radius(v){
+setRadius(v);
+}
+
+};
+
+showSelected();
+
+})();
