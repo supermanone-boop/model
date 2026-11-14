@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoFS MSFS Realism Toolkit v13
 // @namespace    geofs.msfs.realism
-// @version      13.1.0
-// @description  GeoFS-native Graphics integration, inferred roof meshes using real orthophoto pixels, high-quality shadows and full-on startup.
+// @version      13.2.0
+// @description  GeoFS Graphics integration, conservative GPU-safe rendering, and baked weathering on orthophoto roof textures.
 // @match        https://www.geo-fs.com/geofs.php*
 // @match        https://geo-fs.com/geofs.php*
 // @run-at       document-idle
@@ -12,7 +12,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '13.1.0';
+  const VERSION = '13.2.0';
   const KEY = '__GEOFS_MSFS_REALISM_V13__';
   const CACHE_PREFIX = 'geofs_msfs_v13_osm_';
   const CACHE_TTL = 4 * 60 * 60 * 1000;
@@ -25,8 +25,12 @@
     (!!window.matchMedia && matchMedia('(pointer: coarse)').matches && innerWidth < 1100);
 
   if (window[KEY]) {
-    window[KEY].togglePanel();
-    return;
+    if (window[KEY].version === VERSION) {
+      window[KEY].togglePanel();
+      return;
+    }
+    try { if (typeof window[KEY].cleanup === 'function') window[KEY].cleanup(); } catch (_) {}
+    try { delete window[KEY]; } catch (_) { window[KEY] = null; }
   }
 
   // Remove previous add-on generations to avoid stacked overlays and panels.
@@ -128,6 +132,10 @@
   let roofPhotoLastError = '';
   let roofPhotoInferredBuildings = 0;
   let roofPhotoExplicitBuildings = 0;
+  let weatheredRoofTileCount = 0;
+  const weatheredRoofTileCache = new Map();
+  let renderErrorRemove = null;
+  let samplerRecoveryDone = false;
   let allOnApplied = false;
   const tileLightingBackups = new Map();
   let allOnPromise = null;
@@ -263,11 +271,51 @@
     if (scene && typeof scene.requestRender === 'function') safe(() => scene.requestRender());
   }
 
-  function maxMsaaSamples() {
+  function gpuCapabilities() {
     const scene = getScene();
-    const gl = scene && scene.context && scene.context._gl;
-    if (!gl) return 1;
-    return safe(() => gl.getParameter(gl.MAX_SAMPLES)) || 1;
+    const context = scene && scene.context;
+    const gl = context && context._gl;
+    if (!gl) return { textureUnits: 8, combinedTextureUnits: 8, maxSamples: 1, maxTextureSize: 2048, webgl2: false };
+    const read = (key, fallback) => safe(() => gl.getParameter(gl[key])) || fallback;
+    return {
+      textureUnits: read('MAX_TEXTURE_IMAGE_UNITS', 8),
+      combinedTextureUnits: read('MAX_COMBINED_TEXTURE_IMAGE_UNITS', 8),
+      maxSamples: read('MAX_SAMPLES', 1),
+      maxTextureSize: read('MAX_TEXTURE_SIZE', 2048),
+      webgl2: !!(context.webgl2 || (window.WebGL2RenderingContext && gl instanceof window.WebGL2RenderingContext))
+    };
+  }
+
+  function maxMsaaSamples() {
+    return gpuCapabilities().maxSamples || 1;
+  }
+
+  function installSamplerRecovery() {
+    const scene = getScene();
+    if (!scene || !scene.renderError || typeof scene.renderError.addEventListener !== 'function' || renderErrorRemove) return;
+    const remove = scene.renderError.addEventListener((renderScene, error) => {
+      const message = String(error && (error.message || error.stack) || error || '');
+      if (!/sampler|program failed to link|linking failed/i.test(message) || samplerRecoveryDone) return;
+      samplerRecoveryDone = true;
+      const stages = renderScene && renderScene.postProcessStages;
+      safe(() => { if (sharpenStage) sharpenStage.enabled = false; });
+      safe(() => { if (stages && stages.ambientOcclusion) stages.ambientOcclusion.enabled = false; });
+      safe(() => { if (stages && stages.bloom) stages.bloom.enabled = false; });
+      safe(() => { if (stages && stages.fxaa) stages.fxaa.enabled = true; });
+      safe(() => { if (renderScene && 'msaaSamples' in renderScene) renderScene.msaaSamples = 1; });
+      safe(() => { if (renderScene && 'highDynamicRange' in renderScene) renderScene.highDynamicRange = false; });
+      const g = getGeoFS();
+      safe(() => { if (g && g.api && typeof g.api.setWaterEffect === 'function') g.api.setWaterEffect(false); });
+      safe(() => { if (g && g.preferences && g.preferences.graphics) g.preferences.graphics.waterEffect = false; });
+      safe(() => { if (g && g.preferences && g.preferences.graphics && g.preferences.graphics.advanced) g.preferences.graphics.advanced.volumetricClouds = false; });
+      safe(() => { if (g && g.api && typeof g.api.useNativeShadows === 'function') g.api.useNativeShadows(false); });
+      removeGsiGroundImagery();
+      state.water = false; state.volumetricClouds = false; state.shadows = false;
+      state.sharpen = false; state.ao = false; state.bloom = false;
+      lastMessage = 'GPUサンプラー上限を検知したため、追加エフェクト・GSI重ね表示・MSAA・水面・雲・影を停止して復旧を試みました';
+      setTimeout(() => { requestRender(); updatePanel(); }, 0);
+    });
+    renderErrorRemove = typeof remove === 'function' ? remove : null;
   }
 
   function applyQualityProfile(profile) {
@@ -468,15 +516,17 @@
     p.advanced = p.advanced || {};
     const adv = p.advanced;
     const rs = g.api.renderingSettings || {};
-    const maxSamples = maxMsaaSamples();
-    const sampleCount = maxSamples >= 8 ? 8 : maxSamples >= 4 ? 4 : maxSamples >= 2 ? 2 : 1;
+    const caps = gpuCapabilities();
+    // Avoid the aggressive 4x/8x MSAA + post-process combination that can exhaust
+    // texture/sampler resources on mobile browsers. MSAA is reserved for capable desktops.
+    const sampleCount = !mobile && caps.webgl2 && caps.textureUnits >= 16 && caps.maxSamples >= 2 ? 2 : 1;
     const values = {
-      viewingDistance: mobile ? 5 : 7,
-      resolutionScale: mobile ? 1.0 : 1.12,
-      tileCacheSize: mobile ? 1100 : 3600,
-      shadowQuality: mobile ? 0.88 : 1.35,
-      cloudDensity: 1.08,
-      waterResolution: mobile ? 768 : 2048,
+      viewingDistance: mobile ? 4 : 6,
+      resolutionScale: mobile ? 0.88 : 1.0,
+      tileCacheSize: mobile ? 520 : 1600,
+      shadowQuality: mobile ? 0.62 : 0.95,
+      cloudDensity: 1.04,
+      waterResolution: mobile ? 512 : 1024,
       fxaa: true,
       dropShadow: true,
       globeLighting: true
@@ -486,12 +536,12 @@
       viewingDistance: values.viewingDistance,
       resolutionScale: values.resolutionScale,
       tileCacheSize: values.tileCacheSize,
-      shadowMapSize: mobile ? 2048 : 4096,
+      shadowMapSize: mobile ? 1024 : 2048,
       waterResolution: values.waterResolution,
       fxaa: true,
       dropShadow: true,
       globeLighting: true,
-      maximumScreenSpaceError: mobile ? 2.0 : 1.35
+      maximumScreenSpaceError: mobile ? 2.8 : 2.0
     });
     // Keep the preference object coherent even when the Options panel is not open yet.
     ['buildings','vegetation','advancedAtmosphere','volumetricClouds','waterEffect','contrails','dropShadows','softShadows','globeLighting','fxaa'].forEach(key => { p[key] = true; });
@@ -518,14 +568,14 @@
     const activated = nativeControls.reduce((count,[pattern,value]) => count + (setNativeCheckbox(pattern,value) ? 1 : 0), 0);
     const scene = g.api.viewer.scene;
     if (scene) {
-      if ('highDynamicRange' in scene) safe(() => { scene.highDynamicRange = true; });
+      if ('highDynamicRange' in scene) safe(() => { scene.highDynamicRange = !mobile && caps.textureUnits >= 16; });
       if ('msaaSamples' in scene) safe(() => { scene.msaaSamples = sampleCount; });
       if (scene.globe) {
         safe(() => { scene.globe.enableLighting = true; });
         safe(() => { scene.globe.showGroundAtmosphere = true; });
         safe(() => { scene.globe.showWaterEffect = true; });
-        safe(() => { scene.globe.maximumScreenSpaceError = mobile ? 2.0 : 1.35; });
-        safe(() => { scene.globe.tileCacheSize = mobile ? 1100 : 3600; });
+        safe(() => { scene.globe.maximumScreenSpaceError = mobile ? 2.8 : 2.0; });
+        safe(() => { scene.globe.tileCacheSize = mobile ? 520 : 1600; });
       }
       if (scene.postProcessStages && scene.postProcessStages.fxaa) safe(() => { scene.postProcessStages.fxaa.enabled = true; });
     }
@@ -556,7 +606,7 @@
     photorealisticTilesets().forEach(tileset => {
       safe(() => {
         if ('shadows' in tileset && C.ShadowMode) tileset.shadows = C.ShadowMode.ENABLED;
-        if ('maximumScreenSpaceError' in tileset) tileset.maximumScreenSpaceError = mobile ? 4.0 : 1.7;
+        if ('maximumScreenSpaceError' in tileset) tileset.maximumScreenSpaceError = mobile ? 6.0 : 2.5;
         if ('dynamicScreenSpaceError' in tileset) tileset.dynamicScreenSpaceError = true;
         if ('cullRequestsWhileMoving' in tileset) tileset.cullRequestsWhileMoving = true;
         const ibl = tileset.imageBasedLighting;
@@ -579,7 +629,7 @@
       const maxTex = gl ? safe(() => gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 2048 : 2048;
       viewer.shadowMap.enabled = true;
       viewer.shadowMap.softShadows = true;
-      viewer.shadowMap.size = Math.min(mobile ? 2048 : 4096, maxTex);
+      viewer.shadowMap.size = Math.min(mobile ? 1024 : 2048, maxTex);
       viewer.shadowMap.darkness = 0.36;
     }
   }
@@ -633,7 +683,7 @@
         'road','crossings','rail','roadSurface','airportSurface','buildingOutlines','urbanSurfaces',
         'trafficFurniture','greenInfrastructure','barriers','powerNetwork','hydrography','streetObjects',
         'bridgeStructures','adaptivePerformance','autoNearbyData','parkingMarkings','roofEquipment',
-        'roofs','buildingTexture','buildingLOD','treeLOD','volumetricClouds','water','shadows','sharpen'
+        'roofs','buildingTexture','buildingLOD','treeLOD','volumetricClouds','water','shadows'
       ];
       allFlags.forEach(key => { state[key] = true; });
       state.qualityProfile = 'ultra';
@@ -642,21 +692,21 @@
       try { changeLod('tree', true); } catch (_) { state.treeLOD = false; }
       try { toggleShadows(true); } catch (_) { state.shadows = false; }
       const stages = g.api.viewer.scene.postProcessStages;
-      if (stages && stages.ambientOcclusion) {
-        stages.ambientOcclusion.enabled = true;
-        if (stages.ambientOcclusion.uniforms && 'intensity' in stages.ambientOcclusion.uniforms) stages.ambientOcclusion.uniforms.intensity = mobile ? 1.15 : 1.45;
-        state.ao = true;
-      } else state.ao = false;
-      if (stages && stages.bloom) { stages.bloom.enabled = true; state.bloom = true; } else state.bloom = false;
-      try { toggleSharpen(true); } catch (_) { state.sharpen = false; }
+      // AO, Bloom and the custom sharpen stage are opt-in. Enabling them all at startup
+      // can exceed the shader sampler budget on phone GPUs and older Cesium builds.
+      if (stages && stages.ambientOcclusion) stages.ambientOcclusion.enabled = false;
+      if (stages && stages.bloom) stages.bloom.enabled = false;
+      state.ao = false; state.bloom = false; state.sharpen = false;
       try { setAtmosphereColorProfile(); } catch (_) {}
       try { applyNaturalImagery(); } catch (_) {}
       try { toggleAdaptivePerformance(true); } catch (_) { state.adaptivePerformance = true; }
       const cam = currentCamera();
       const inJapan = cam.lon >= GSI_ROOF_COVERAGE.minLon && cam.lon <= GSI_ROOF_COVERAGE.maxLon && cam.lat >= GSI_ROOF_COVERAGE.minLat && cam.lat <= GSI_ROOF_COVERAGE.maxLat;
       state.gsiImagery = inJapan;
-      if (inJapan && !g.api.googleTileset) {
-        try { toggleGsiGroundImagery(true); } catch (error) { lastMessage = `国土地理院オルソ写真はON指定。読み込み待機: ${error.message}`; }
+      if (inJapan && !g.api.googleTileset && !mobile && gpuCapabilities().textureUnits >= 12) {
+        try { toggleGsiGroundImagery(true); } catch (error) { lastMessage = `国土地理院地表写真は安全条件により保留: ${error.message}`; }
+      } else {
+        state.gsiImagery = false;
       }
       tunePhotorealisticTilesets();
       allOnApplied = true;
@@ -767,6 +817,7 @@
     if (!scene || !scene.postProcessStages) throw new Error('Cesium PostProcessStagesが見つかりません');
     const stage = name === 'ao' ? scene.postProcessStages.ambientOcclusion : scene.postProcessStages.bloom;
     if (!stage) throw new Error(`${name}ステージはこの端末・ビルドでは利用できません`);
+    if (enable && gpuCapabilities().textureUnits < 8) throw new Error('GPUのテクスチャユニットが少ないため、この追加エフェクトは有効化できません');
     stage.enabled = !!enable;
     if (name === 'ao') state.ao = !!enable;
     else state.bloom = !!enable;
@@ -812,6 +863,7 @@
   }
 
   function toggleSharpen(enable) {
+    if (enable && mobile && gpuCapabilities().textureUnits < 12) throw new Error('この端末ではサンプラー上限対策のためシャープ処理を停止しています');
     const stage = ensureSharpenStage();
     if (!stage) throw new Error('ディテール強調用PostProcessStageが作成できません');
     stage.enabled = !!enable;
@@ -1397,6 +1449,9 @@
     if (enable) {
       if (gsiImageryLayer) { state.gsiImagery = true; return; }
       if (g.api.googleTileset) throw new Error('Google Photorealistic 3D使用中は地表写真レイヤーを重ねられません');
+      const caps = gpuCapabilities();
+      if (caps.textureUnits < 12) throw new Error(`GPUのテクスチャユニットが${caps.textureUnits}個のため、地表写真の追加レイヤーは安全のため停止しました`);
+      if (g.api.viewer.imageryLayers.length > 1) throw new Error('既に複数の航空写真レイヤーがあるため、サンプラー上限対策としてGSI追加レイヤーを停止しました');
       if (!C.UrlTemplateImageryProvider || !C.Rectangle || typeof C.Rectangle.fromDegrees !== 'function') {
         throw new Error(`Cesium ${C.VERSION || ''}でURLテンプレート航空写真レイヤーが利用できません`);
       }
@@ -1538,6 +1593,74 @@
     return added;
   }
 
+  function weatherSeed(text) {
+    let h = 2166136261;
+    for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+
+  function weatheredRoofPhoto(image, tile) {
+    const key = `${tile.key}:weather-v1`;
+    if (weatheredRoofTileCache.has(key)) return weatheredRoofTileCache.get(key);
+    const width = Math.min(512, image.naturalWidth || image.width || 256);
+    const height = Math.min(512, image.naturalHeight || image.height || 256);
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return image;
+    try {
+      ctx.drawImage(image, 0, 0, width, height);
+      const frame = ctx.getImageData(0, 0, width, height);
+      const px = frame.data;
+      let seed = weatherSeed(key);
+      const rand = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+      const spots = Array.from({ length: Math.max(8, Math.round(width * height / 10000)) }, () => ({
+        x: rand() * width, y: rand() * height,
+        rx: width * (0.018 + rand() * 0.075), ry: height * (0.018 + rand() * 0.075),
+        power: 0.035 + rand() * 0.105, warm: rand() < 0.34
+      }));
+      const grain = new Float32Array(32 * 32);
+      for (let i = 0; i < grain.length; i++) grain[i] = rand() - 0.5;
+      const streaks = Array.from({ length: 7 }, () => ({
+        x: rand() * width, y: rand() * height, length: height * (0.06 + rand() * 0.22),
+        width: 0.45 + rand() * 1.4, angle: (rand() - 0.5) * 0.45, power: 0.025 + rand() * 0.055
+      }));
+      for (let y = 0; y < height; y++) {
+        const gy = Math.min(31, (y / height * 32) | 0);
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4;
+          let stain = 0, warm = 0;
+          for (let j = 0; j < spots.length; j++) {
+            const sp = spots[j], dx = (x - sp.x) / sp.rx, dy = (y - sp.y) / sp.ry;
+            const d = dx * dx + dy * dy;
+            if (d < 1) { const v = (1 - d) * sp.power; stain += v; if (sp.warm) warm += v; }
+          }
+          for (let j = 0; j < streaks.length; j++) {
+            const st = streaks[j], dx = x - st.x, dy = y - st.y;
+            const along = dx * Math.sin(st.angle) + dy * Math.cos(st.angle);
+            const across = Math.abs(dx * Math.cos(st.angle) - dy * Math.sin(st.angle));
+            if (along >= 0 && along <= st.length && across < st.width) stain += st.power * (1 - across / st.width) * (0.35 + 0.65 * (1 - along / st.length));
+          }
+          const gx = Math.min(31, (x / width * 32) | 0);
+          const micro = grain[gy * 32 + gx] * 3.2 + (rand() - 0.5) * 2.1;
+          const darken = Math.min(0.20, stain);
+          const delta = micro - darken * 74;
+          px[i] = Math.max(0, Math.min(255, px[i] + delta + warm * 5));
+          px[i + 1] = Math.max(0, Math.min(255, px[i + 1] + delta - warm * 1.5));
+          px[i + 2] = Math.max(0, Math.min(255, px[i + 2] + delta - warm * 6));
+        }
+      }
+      ctx.putImageData(frame, 0, 0);
+      weatheredRoofTileCount++;
+    } catch (error) {
+      roofPhotoLastError = `屋根の汚れ加工をスキップ: ${error && error.message ? error.message : error}`;
+      return image;
+    }
+    weatheredRoofTileCache.set(key, canvas);
+    while (weatheredRoofTileCache.size > (mobile ? 8 : 24)) weatheredRoofTileCache.delete(weatheredRoofTileCache.keys().next().value);
+    return canvas;
+  }
+
   async function commitPhotographicGroups(C, groups, targetArray) {
     const entries = Array.from(groups.values());
     const loaded = await Promise.all(entries.map(async group => {
@@ -1552,7 +1675,8 @@
       if (!result || !result.group.instances.length) continue;
       const group = result.group;
       try {
-        const material = C.Material.fromType('Image', { image: result.image });
+        const bakedPhoto = weatheredRoofPhoto(result.image, group);
+        const material = C.Material.fromType('Image', { image: bakedPhoto });
         const primitive = new C.Primitive({
           geometryInstances: group.instances,
           appearance: new C.MaterialAppearance({ material, flat: false, faceForward: false, translucent: false, closed: false, materialSupport: C.MaterialAppearance.MaterialSupport.TEXTURED }),
@@ -2813,6 +2937,8 @@
       `Urban surfaces: ${!!urbanSurfacePrimitive} / traffic fixtures: ${trafficSource ? trafficSource.entities.values.length : 0}`,
       `OSM facade-window geometry instances: ${facadeDetailCount}`,
       `Photographic roof mesh: ${Array.isArray(roofPrimitive) ? roofPrimitive.length : !!roofPrimitive} tile primitives / ${roofPhotoBuildingsUsed} buildings / ${roofPhotoTilesUsed} GSI tiles`,
+      `Weathered roof photo tiles: ${weatheredRoofTileCount} / cache ${weatheredRoofTileCache.size}`,
+      `GPU caps: ${JSON.stringify(gpuCapabilities())}`,
       `Roof inference: explicit ${roofPhotoExplicitBuildings} / inferred ${roofPhotoInferredBuildings} / skipped ${roofPhotoBuildingsSkipped}`,
       `All-on startup: ${allOnApplied} / GSI in-region ${camera.lon >= GSI_ROOF_COVERAGE.minLon && camera.lon <= GSI_ROOF_COVERAGE.maxLon && camera.lat >= GSI_ROOF_COVERAGE.minLat && camera.lat <= GSI_ROOF_COVERAGE.maxLat}`,
       `Roof photo coverage: Japan ${GSI_ROOF_COVERAGE.minLon}-${GSI_ROOF_COVERAGE.maxLon}E, ${GSI_ROOF_COVERAGE.minLat}-${GSI_ROOF_COVERAGE.maxLat}N / zoom ${GSI_ROOF_ZOOM}`,
@@ -3271,6 +3397,8 @@
     state.ao = !!original.ao; state.bloom = !!original.bloom; state.sharpen = false; state.qualityProfile = 'native';
     state.brightness = 1; state.contrast = 1; state.saturation = 1; state.sharpness = 0.14;
     osmElements = [];
+    weatheredRoofTileCache.clear(); weatheredRoofTileCount = 0;
+    samplerRecoveryDone = false;
     lastOsmCell = ''; lastAutoCellAttempt = ''; lastDetailBand = '';
     lastMessage = 'GeoFS起動時の設定へ復元しました';
     requestRender();
@@ -3314,6 +3442,7 @@
     if (nativeUiRetryTimer) clearInterval(nativeUiRetryTimer);
     nativeUiObserver = null; nativeUiRetryTimer = null; nativeUiMountedHost = null;
     if (renderEventRemove) safe(() => renderEventRemove());
+    if (renderErrorRemove) safe(() => renderErrorRemove());
     if (state.adaptivePerformance) safe(() => toggleAdaptivePerformance(false));
     delete window[KEY];
   }
@@ -3347,10 +3476,10 @@
     const stages=g.api.viewer.scene.postProcessStages;
     state.ao=!!(stages&&stages.ambientOcclusion&&stages.ambientOcclusion.enabled);
     state.bloom=!!(stages&&stages.bloom&&stages.bloom.enabled);
-    lastMessage=`GeoFS ${g.version||''} / Cesium ${C.VERSION||'unknown'}。公式Graphics欄を検出して全機能ONを適用します。`;
-    window[KEY]={togglePanel,cleanup,diagnostics:diagnosticsText,loadArea:()=>loadOsmArea(false),reset:resetAll,enableAll:applyEverythingOn};
+    lastMessage=`GeoFS ${g.version||''} / Cesium ${C.VERSION||'unknown'}。公式Graphics欄を検出してGPU安全設定を適用します。`;
+    window[KEY]={version:VERSION,togglePanel,cleanup,diagnostics:diagnosticsText,loadArea:()=>loadOsmArea(false),reset:resetAll,enableAll:applyEverythingOn};
     window.addEventListener('pagehide',cleanup,{once:true});
-    ensureSharpenStage(); updatePanel();
+    installSamplerRecovery(); updatePanel();
     if(!allOnApplied&&!allOnPromise) {
       setTimeout(()=>{if(!allOnApplied&&!allOnPromise)runAction(applyEverythingOn);},900);
     }
