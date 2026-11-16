@@ -1,0 +1,177 @@
+"use strict";
+(()=>{
+const C=window.Cesium,g=window.geofs;
+if(!C||!g?.api?.viewer){
+ alert("GeoFSが読み込まれていません");
+ return;
+}
+
+const viewer=g.api.viewer;
+const scene=viewer.scene;
+
+const BASE=
+ "https://huggingface.co/supermanone-boop/OSAKA/resolve/main/";
+
+const BASE_LON=135.4953509;
+const BASE_LAT=34.7022887;
+
+const models=[
+ {
+  file:"OskKTV_LOD00.glb",
+  east:1365,north:305,scale:40,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:1,specular:1
+ },
+ {
+  file:"OskKita_LOD00.glb",
+  east:164.58,north:309.6,scale:80,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:76.62,specular:0
+ },
+ {
+  file:"OskKita10_LOD00.glb",
+  east:-536.53,north:-725.32,scale:78.89999389648438,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:1,specular:1
+ },
+ {
+  file:"OskKita2_LOD00.glb",
+  east:122.85,north:-578.71,scale:79,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:1,specular:1
+ },
+ {
+  file:"OskKita3_LOD00.glb",
+  east:420.28,north:588.26,scale:78.89999389648438,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:1,specular:1
+ },
+ {
+  file:"OskKita4_LOD00.glb",
+  east:467.74,north:-292.41,scale:78.89999389648438,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:1,specular:1
+ },
+ {
+  file:"OskKita6_LOD00.glb",
+  east:-252.19,north:-439.46,scale:78.89999389648438,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:1,specular:1
+ },
+ {
+  file:"OskKita7_LOD00.glb",
+  east:166.30,north:-1010.20,scale:79.10000610351562,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:1,specular:1
+ },
+ {
+  file:"OskKita8_LOD00.glb",
+  east:-776.56,north:-1443.33,scale:78.89999389648438,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:1,specular:1
+ },
+ {
+  file:"OskKita9_LOD00.glb",
+  east:185.16,north:1282.01,scale:79.5,
+  rz:180,rx:0,ry:359.9945068359375,
+  diffuse:1,specular:1
+ }
+];
+
+const HEIGHT=18.8;
+const LIGHT=3;
+
+function makeMatrix(m){
+ const origin=C.Cartesian3.fromDegrees(
+  BASE_LON,BASE_LAT,0
+ );
+
+ const enu=C.Transforms.eastNorthUpToFixedFrame(origin);
+
+ const local=new C.Cartesian3(
+  m.east,m.north,0
+ );
+
+ const world=C.Matrix4.multiplyByPoint(
+  enu,local,new C.Cartesian3()
+ );
+
+ const carto=C.Cartographic.fromCartesian(world);
+ let terrain=scene.globe.getHeight(carto);
+ if(!Number.isFinite(terrain))terrain=0;
+
+ const position=C.Cartesian3.fromRadians(
+  carto.longitude,
+  carto.latitude,
+  terrain+HEIGHT
+ );
+
+ const hpr=new C.HeadingPitchRoll(
+  C.Math.toRadians(m.rz),
+  C.Math.toRadians(m.rx),
+  C.Math.toRadians(m.ry)
+ );
+
+ return C.Transforms.headingPitchRollToFixedFrame(
+  position,hpr,C.Ellipsoid.WGS84,
+  C.Transforms.eastNorthUpToFixedFrame
+ );
+}
+
+window.__osakaGLBPlacement?.destroy?.();
+
+const added=[];
+
+const manager={
+ destroy(){
+  added.forEach(model=>{
+   try{scene.primitives.remove(model);}catch(e){}
+  });
+  added.length=0;
+ }
+};
+
+window.__osakaGLBPlacement=manager;
+
+models.forEach(m=>{
+ const url=BASE+m.file;
+
+ try{
+  const model=C.Model.fromGltf({
+   url,
+   modelMatrix:makeMatrix(m),
+   scale:m.scale,
+   allowPicking:true,
+   incrementallyLoadTextures:true
+  });
+
+  scene.primitives.add(model);
+  added.push(model);
+
+  const ready=model.readyPromise;
+  if(ready&&typeof ready.then==="function"){
+   ready.then(()=>{
+    model.color=new C.Color(
+     LIGHT,LIGHT,LIGHT,1
+    );
+    model.imageBasedLightingFactor=
+     new C.Cartesian2(m.diffuse,m.specular);
+
+    console.log("[OSAKA] Loaded:",m.file);
+   }).catch(error=>{
+    console.error("[OSAKA] Failed:",m.file,error);
+   });
+  }
+ }catch(error){
+  console.error("[OSAKA] Error:",m.file,error);
+ }
+});
+
+console.log(
+ "[OSAKA] GLB placement started:",
+ models.length,"models",
+ "height:",HEIGHT,
+ "Z rotation: 180",
+ "light:",LIGHT
+);
+})();
