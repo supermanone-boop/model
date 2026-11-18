@@ -1,0 +1,384 @@
+
+(()=>{
+const G=window.geofs,C=window.Cesium;
+if(!G||!C||!G.api?.viewer){
+ console.error("GeoFS / Cesiumが見つかりません");
+ return;
+}
+document.getElementById("geoHeightTool")?.remove();
+
+const viewer=G.api.viewer,scene=viewer.scene,globe=scene.globe;
+const provider=globe.terrainProvider;
+
+const panel=document.createElement("div");
+panel.id="geoHeightTool";
+panel.style.cssText="position:fixed;top:65px;left:10px;width:290px;max-height:75vh;overflow:auto;background:#20252c;color:white;z-index:999999;font:13px Arial;padding:12px;border:1px solid #596575;border-radius:9px;box-shadow:0 3px 15px #0009;";
+panel.innerHTML=`
+<div style="display:flex;justify-content:space-between;align-items:center">
+<b style="font-size:16px">GeoFS Terrain Height</b>
+<button id="ghClose">×</button>
+</div>
+<div style="margin:10px 0">GeoJSONファイル（複数選択可能）</div>
+<input id="ghFiles" type="file" accept=".json,.geojson,application/geo+json,application/json" multiple style="width:100%">
+<div style="margin-top:12px">標高取得方式</div>
+<div style="font-size:11px;color:#b9c5d2;margin-top:4px">
+TerrainProvider → Globe.getHeight
+</div>
+<div style="margin-top:9px">
+<label><input id="ghRetry" type="checkbox" checked> 未取得地点を再試行</label>
+</div>
+<div style="margin-top:6px">
+<label><input id="ghNegative" type="checkbox" checked> 0m未満の標高を除外（陸上用）</label>
+</div>
+<button id="ghStart" style="width:100%;padding:10px;margin-top:12px;background:#287bd1;color:white;border:0;border-radius:5px">標高取得開始</button>
+<div id="ghStatus" style="margin-top:12px;white-space:pre-wrap">GeoJSONを読み込んでください。</div>
+<div id="ghDownloads" style="margin-top:10px"></div>
+<button id="ghAll" style="width:100%;padding:9px;margin-top:8px;background:#38865b;color:white;border:0;border-radius:5px;display:none">全ファイル統合GeoJSON出力</button>
+`;
+document.body.appendChild(panel);
+
+const $=id=>panel.querySelector("#"+id);
+let results=[];
+let busy=false;
+
+$("ghClose").onclick=()=>panel.remove();
+
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+
+function validHeight(h){
+ return typeof h==="number"&&Number.isFinite(h);
+}
+
+function getRenderedHeight(lon,lat){
+ try{
+  const p=C.Cartographic.fromDegrees(lon,lat);
+  const h=globe.getHeight(p);
+  return validHeight(h)?h:null;
+ }catch(e){
+  return null;
+ }
+}
+
+// Globe.getHeightによる予備取得
+async function fallbackHeight(lon,lat){
+ let h=getRenderedHeight(lon,lat);
+ if(h!==null)return h;
+ if(!$("ghRetry").checked)return null;
+
+ for(let i=0;i<6;i++){
+  scene.requestRender?.();
+  await wait(150);
+  h=getRenderedHeight(lon,lat);
+  if(h!==null)return h;
+ }
+ return null;
+}
+
+// TerrainProviderからまとめて地形標高を取得
+async function sampleBatch(coords){
+ const heights=new Array(coords.length).fill(null);
+
+ if(!provider)return heights;
+
+ // 1. 最高詳細度で取得
+ if(typeof C.sampleTerrainMostDetailed==="function"){
+  try{
+   if(provider.availability){
+    const positions=coords.map(p=>
+     C.Cartographic.fromDegrees(p[0],p[1])
+    );
+
+    const sampled=await C.sampleTerrainMostDetailed(
+     provider,positions
+    );
+
+    for(let i=0;i<sampled.length;i++){
+     const h=sampled[i]?.height;
+     if(validHeight(h))heights[i]=h;
+    }
+   }
+  }catch(e){
+   console.warn("最高詳細度取得失敗:",e);
+  }
+ }
+
+ // 2. 最高詳細度で取れなかった地点をレベル指定で取得
+ if(typeof C.sampleTerrain==="function"){
+  let maxLevel=Number.isFinite(provider.maximumLevel)
+   ?Math.floor(provider.maximumLevel):12;
+
+  maxLevel=Math.max(1,Math.min(18,maxLevel));
+
+  const minLevel=Math.max(1,maxLevel-4);
+
+  for(let level=maxLevel;level>=minLevel;level--){
+   const indexes=[];
+
+   for(let i=0;i<heights.length;i++){
+    if(heights[i]===null)indexes.push(i);
+   }
+
+   if(!indexes.length)break;
+
+   const positions=indexes.map(i=>
+    C.Cartographic.fromDegrees(coords[i][0],coords[i][1])
+   );
+
+   try{
+    const sampled=await C.sampleTerrain(
+     provider,level,positions
+    );
+
+    for(let j=0;j<indexes.length;j++){
+     const h=sampled[j]?.height;
+     if(validHeight(h)){
+      heights[indexes[j]]=h;
+     }
+    }
+   }catch(e){
+    console.warn("地形レベル取得失敗:",level,e);
+   }
+  }
+ }
+
+ return heights;
+}
+
+// GeoJSONの座標を抽出
+function collectCoordinates(data,out){
+ if(!Array.isArray(data))return;
+
+ if(
+  data.length>=2&&
+  typeof data[0]==="number"&&
+  typeof data[1]==="number"&&
+  Number.isFinite(data[0])&&
+  Number.isFinite(data[1])
+ ){
+  out.push(data);
+  return;
+ }
+
+ for(const item of data){
+  collectCoordinates(item,out);
+ }
+}
+
+function collectGeometry(geometry,out){
+ if(!geometry)return;
+
+ if(geometry.type==="GeometryCollection"){
+  for(const g of geometry.geometries||[]){
+   collectGeometry(g,out);
+  }
+  return;
+ }
+
+ collectCoordinates(geometry.coordinates,out);
+}
+
+function collectGeoJSON(json){
+ const coords=[];
+
+ if(json.type==="FeatureCollection"){
+  for(const f of json.features||[]){
+   collectGeometry(f.geometry,coords);
+  }
+ }else if(json.type==="Feature"){
+  collectGeometry(json.geometry,coords);
+ }else{
+  collectGeometry(json,coords);
+ }
+
+ return coords;
+}
+
+function setAltitude(coord,h){
+ if(coord.length>=3)coord[2]=h;
+ else coord.push(h);
+}
+
+function download(name,obj){
+ const blob=new Blob(
+  [JSON.stringify(obj)],
+  {type:"application/geo+json"}
+ );
+
+ const url=URL.createObjectURL(blob);
+ const a=document.createElement("a");
+ a.href=url;
+ a.download=name;
+ a.click();
+
+ setTimeout(()=>URL.revokeObjectURL(url),30000);
+}
+
+async function processFile(file,fi,totalFiles){
+ const json=JSON.parse(await file.text());
+ const coords=collectGeoJSON(json);
+
+ const stats={
+  total:coords.length,
+  ok:0,
+  fail:0,
+  negative:0
+ };
+
+ const batchSize=100;
+
+ for(let start=0;start<coords.length;start+=batchSize){
+  const batch=coords.slice(start,start+batchSize);
+
+  $("ghStatus").textContent=
+   `標高取得中...\nファイル: ${fi+1}/${totalFiles}\n`+
+   `地点: ${Math.min(start+batch.length,coords.length)}/${coords.length}\n`+
+   `成功: ${stats.ok}\n未取得: ${stats.fail}\n負の標高除外: ${stats.negative}`;
+
+  // TerrainProviderによる一括取得
+  const heights=await sampleBatch(batch);
+
+  // 取得できなかった地点だけGlobe.getHeightを使用
+  const missing=[];
+
+  for(let i=0;i<batch.length;i++){
+   if(heights[i]===null){
+    missing.push(i);
+   }
+  }
+
+  if(missing.length){
+   const fallback=await Promise.all(
+    missing.map(i=>
+     fallbackHeight(batch[i][0],batch[i][1])
+    )
+   );
+
+   for(let j=0;j<missing.length;j++){
+    if(validHeight(fallback[j])){
+     heights[missing[j]]=fallback[j];
+    }
+   }
+  }
+
+  // 結果をGeoJSONに反映
+  for(let i=0;i<batch.length;i++){
+   const coord=batch[i];
+   let h=heights[i];
+
+   if(
+    validHeight(h)&&
+    $("ghNegative").checked&&
+    h<0
+   ){
+    stats.negative++;
+    h=null;
+   }
+
+   if(h!==null&&validHeight(h)){
+    setAltitude(coord,h);
+    stats.ok++;
+   }else{
+    setAltitude(coord,null);
+    stats.fail++;
+   }
+  }
+
+  await wait(0);
+ }
+
+ return {
+  name:file.name.replace(/\.(geo)?json$/i,"")+"_height.geojson",
+  json,
+  stats
+ };
+}
+
+$("ghStart").onclick=async()=>{
+ if(busy)return;
+
+ const files=[...$("ghFiles").files];
+
+ if(!files.length){
+  $("ghStatus").textContent="ファイルを選択してください。";
+  return;
+ }
+
+ busy=true;
+ $("ghStart").disabled=true;
+ $("ghDownloads").innerHTML="";
+ $("ghAll").style.display="none";
+ results=[];
+
+ try{
+  for(let i=0;i<files.length;i++){
+   $("ghStatus").textContent="読み込み中: "+files[i].name;
+
+   const result=await processFile(
+    files[i],i,files.length
+   );
+
+   results.push(result);
+
+   $("ghStatus").textContent=
+    `完了: ${files[i].name}\n`+
+    `総地点数: ${result.stats.total}\n`+
+    `取得成功: ${result.stats.ok}\n`+
+    `未取得: ${result.stats.fail}\n`+
+    `負の標高除外: ${result.stats.negative}\n`+
+    `ファイル: ${i+1}/${files.length}`;
+  }
+
+  $("ghDownloads").innerHTML="";
+
+  results.forEach((r)=>{
+   const b=document.createElement("button");
+   b.textContent="↓ "+r.name;
+   b.style.cssText="display:block;width:100%;padding:8px;margin-top:5px;background:#394957;color:white;border:0;border-radius:4px;text-align:left";
+
+   b.onclick=()=>download(r.name,r.json);
+   $("ghDownloads").appendChild(b);
+  });
+
+  $("ghAll").style.display="block";
+
+  $("ghStatus").textContent+="\n\nすべてのファイルの処理が完了しました。";
+
+ }catch(e){
+  $("ghStatus").textContent="エラー: "+e.message;
+  console.error(e);
+
+ }finally{
+  busy=false;
+  $("ghStart").disabled=false;
+ }
+};
+
+$("ghAll").onclick=()=>{
+ const features=[];
+
+ for(const r of results){
+  const j=r.json;
+
+  if(j.type==="FeatureCollection"){
+   features.push(...j.features);
+  }else if(j.type==="Feature"){
+   features.push(j);
+  }else{
+   features.push({
+    type:"Feature",
+    properties:{},
+    geometry:j
+   });
+  }
+ }
+
+ download("GeoFS_All_Height.geojson",{
+  type:"FeatureCollection",
+  features
+ });
+};
+
+console.log("GeoFS Terrain Height Tool loaded");
+console.log("TerrainProvider:",provider);
+console.log("sampleTerrainMostDetailed:",typeof C.sampleTerrainMostDetailed);
+})();
