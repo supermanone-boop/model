@@ -15,7 +15,7 @@
   const G = W.geofs;
   const API = G?.api;
   const KEY = "__GEOFS_MSFS_VISUAL_COMPLETE__";
-  const VERSION = "1.1.0";
+  const VERSION = "1.1.1";
   const REPO_ROOT = "https://raw.githubusercontent.com/supermanone-boop/model/refs/heads/main";
   const ASSET_ROOT = `${REPO_ROOT}/visual-assets`;
   const ASSETS = {
@@ -29,9 +29,22 @@
     return;
   }
   if (W[KEY]?.installed) {
-    W[KEY].refresh();
-    console.info("[GeoFS Visual Complete] Already installed; refreshed existing edition.");
-    return;
+    if (W[KEY].version === VERSION) {
+      W[KEY].refresh();
+      console.info("[GeoFS Visual Complete] Already installed; refreshed existing edition.");
+      return;
+    }
+    if (typeof W[KEY].restore === "function") {
+      const restored = W[KEY].restore();
+      if (restored !== true) {
+        console.error("[GeoFS Visual Complete] Previous edition could not be restored. Reload GeoFS before installing this update.");
+        return;
+      }
+      console.info("[GeoFS Visual Complete] Previous edition restored; upgrading to " + VERSION + ".");
+    } else {
+      console.error("[GeoFS Visual Complete] An older edition is active. Reload GeoFS before installing this update.");
+      return;
+    }
   }
 
   const viewer = API.viewer;
@@ -372,6 +385,7 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
     lockHighestPreset: true,
     material: null,
     materialApplied: false,
+    manualUniformFallbacks: [],
     assetsConfigured: false,
     assetsPreflight: "not-started",
     lastError: null,
@@ -452,6 +466,39 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
     return state.assetPromise;
   }
 
+  function installGeoFSManualTerrainUniforms(material) {
+    // The supplied Cesium 1.136.0 vertex shader has two GeoFS-specific manual
+    // uniforms that are not included in its stock terrain uniformMap.
+    // ShaderProgram._setUniforms calls every manual uniform as a function;
+    // leaving either entry absent causes: e[c.name] is not a function.
+    const uniformMap = material?._uniforms;
+    if (!uniformMap || typeof uniformMap !== "object") {
+      throw new Error("Cesium Material._uniforms is unavailable; cannot install GeoFS terrain uniform callbacks.");
+    }
+
+    if (typeof uniformMap.windSpeed_0 !== "function") {
+      uniformMap.windSpeed_0 = () => {
+        const w = W.weather;
+        const value = Number(w?.currentWindSpeedMs ?? w?.definition?.windSpeedMS ?? 0);
+        return Number.isFinite(value) ? value : 0;
+      };
+    }
+    if (typeof uniformMap.geofsTime_1 !== "function") {
+      uniformMap.geofsTime_1 = () => {
+        const value = Number(G.fx?.precisionTime ?? API.precisionTime ?? 0);
+        return Number.isFinite(value) ? value : 0;
+      };
+    }
+
+    const required = ["windSpeed_0", "geofsTime_1"];
+    const missing = required.filter(name => typeof uniformMap[name] !== "function");
+    if (missing.length) {
+      throw new Error(`GeoFS terrain uniform callbacks are invalid: ${missing.join(", ")}`);
+    }
+    state.manualUniformFallbacks = required;
+    return uniformMap;
+  }
+
   async function createTerrainMaterial() {
     if (state.material) return state.material;
     if (state.materialPromise) return state.materialPromise;
@@ -483,6 +530,7 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
       minificationFilter: C.TextureMinificationFilter.LINEAR_MIPMAP_LINEAR,
       magnificationFilter: C.TextureMagnificationFilter.LINEAR
       });
+      installGeoFSManualTerrainUniforms(material);
       if (!state.installed || generation !== state.generation) {
         material.destroy?.();
         return null;
@@ -830,6 +878,7 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
       hasVertexNormals: base?.hasVertexNormals,
       terrainMaterialApplied: state.materialApplied,
       terrainMaterialAssets: state.assetsPreflight,
+      terrainManualUniformFallbacks: [...state.manualUniformFallbacks],
       globeSSE: globe.maximumScreenSpaceError,
       tileCacheSize: globe.tileCacheSize,
       lambertDiffuseMultiplier: globe.lambertDiffuseMultiplier,
