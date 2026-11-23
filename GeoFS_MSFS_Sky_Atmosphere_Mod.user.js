@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         GeoFS MSFS Atmospheric Lighting & Sky Overhaul
 // @namespace    https://dya.jp/geofs-msfs-atmosphere-mod
-// @version      5.3.0
+// @version      5.4.0
 // @description  Native GeoFS Options integration with MSFS-inspired atmosphere, volumetric cloud and weather visual modules.
 // @match        https://www.geo-fs.com/geofs.php*
+// @match        https://beta.geo-fs.com/geofs.php*
 // @match        https://geo-fs.com/geofs.php*
 // @run-at       document-idle
 // @grant        none
@@ -11,13 +12,13 @@
 (function () {
 'use strict';
 
-const KEY = '__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V53__';
-const MARK = 'GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V53';
+const KEY = '__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V54__';
+const MARK = 'GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V54';
 if (window[KEY]) return;
 
 // Stop the previous experimental build if it is still active.
 try {
-  for (const oldKey of ['__GEOFS_MSFS_CLOUD_ENGINE_V30__','__GEOFS_MSFS_ATMOSPHERE_REALISM_MOD_V40__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V50__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V51__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V52__']) {
+  for (const oldKey of ['__GEOFS_MSFS_CLOUD_ENGINE_V30__','__GEOFS_MSFS_ATMOSPHERE_REALISM_MOD_V40__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V50__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V51__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V52__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V53__']) {
     const old = window[oldKey];
     if (old && typeof old.disable === 'function') old.disable();
   }
@@ -67,7 +68,7 @@ function readStored() {
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 
 const state = window[KEY] = {
-  version: '5.3.0', active: false, ready: false, error: null,
+  version: '5.4.0', active: false, ready: false, error: null,
   originalShaders: null, originalCreate: null, originalDestroy: null,
   originalSpawnClouds: null,
   stageUniformsInstalled: false, createWrapped: false, rendererRebuilt: false,
@@ -77,7 +78,7 @@ const state = window[KEY] = {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings)); } catch (_) {}
   }
 };
-const log = (...args) => console.info('[GeoFS MSFS Sky Atmosphere Mod 5.3]', ...args);
+const log = (...args) => console.info('[GeoFS MSFS Sky Atmosphere Mod 5.4]', ...args);
 
 const densityFunction = String.raw`float cloudDensity(vec3 p, vec3 wind, float lod, inout float heightRatio, float finalCoverage) {
     float stockHeightRatio = 0.0;
@@ -332,6 +333,33 @@ vec3 light_dir
     return vec4(max(radiance, vec3(0.0)), clamp(opacity, 0.0, 1.0));
 }`;
 
+function findShaderFunctionBodyEnd(source, openBraceIndex) {
+  let depth = 0;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let i = openBraceIndex; i < source.length; i++) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') { inBlockComment = false; i++; }
+      continue;
+    }
+    if (ch === '/' && next === '/') { inLineComment = true; i++; continue; }
+    if (ch === '/' && next === '*') { inBlockComment = true; i++; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return i;
+      if (depth < 0) return -1;
+    }
+  }
+  return -1;
+}
+
 function patchCommon(source) {
   if (source.includes(MARK)) return source;
   let result = source.replace('precision highp float;', 'precision highp float;\n' + commonUniforms);
@@ -342,12 +370,18 @@ function patchCommon(source) {
   result = result.replace(cloudPattern, stockCloud + '\n' + densityFunction + '\n#endif');
 
   const begin = result.indexOf('vec4 calculate_scattering(');
-  const end = result.indexOf('\n}\n#endif', begin);
-  if (begin < 0 || end < 0) throw new Error('GeoFS calculate_scattering() block was not found');
-  const originalFunction = result.slice(begin, end + 2);
+  if (begin < 0) throw new Error('GeoFS calculate_scattering() declaration was not found');
+  const bodyOpen = result.indexOf('{', begin);
+  if (bodyOpen < 0) throw new Error('GeoFS calculate_scattering() body was not found');
+  const bodyClose = findShaderFunctionBodyEnd(result, bodyOpen);
+  if (bodyClose < 0) throw new Error('GeoFS calculate_scattering() closing brace was not found');
+  const trailing = result.slice(bodyClose + 1);
+  if (!/^\s*#endif\b/.test(trailing)) throw new Error('GeoFS calculate_scattering() ADVANCED_ATMOSPHERE guard was not found after the function');
+  const originalFunction = result.slice(begin, bodyClose + 1);
   const stockFunction = originalFunction.replace('vec4 calculate_scattering(', 'vec4 calculate_scatteringStock(');
   const enhancedFunction = atmosphericScatteringFunction.replace(') {\n    float a = dot(dir, dir);', ') {\n    if (modEnable < 0.5) return calculate_scatteringStock(start, dir, maxDistance, light_dir);\n    float a = dot(dir, dir);');
-  result = result.slice(0, begin) + stockFunction + '\n' + enhancedFunction + result.slice(end + 2);
+  if (enhancedFunction === atmosphericScatteringFunction) throw new Error('Enhanced scattering function entry anchor changed');
+  result = result.slice(0, begin) + stockFunction + '\n' + enhancedFunction + result.slice(bodyClose + 1);
   return result;
 }
 
@@ -789,7 +823,7 @@ function buildNativeUI() {
   const groupsHtml = controlGroups.map((group, index) => `<details ${index === 0 ? 'open' : ''} style="margin-top:9px;border-top:1px solid rgba(130,160,185,.28);padding-top:7px"><summary style="font-weight:600;cursor:pointer;padding:5px 0">${htmlEscape(group.title)}</summary><div style="padding:4px 2px">${group.controls.map(([key,label,min,max,step]) => `<label style="display:block;margin:9px 0 7px"><span style="display:flex;justify-content:space-between;gap:10px"><span>${htmlEscape(label)}</span><output data-gcm5-out="${key}" style="font-variant-numeric:tabular-nums">${state.settings[key].toFixed(2)}</output></span><input data-gcm5-key="${key}" type="range" min="${min}" max="${max}" step="${step}" value="${state.settings[key]}" style="width:100%;accent-color:#4e9acb;touch-action:pan-y"></label>`).join('')}</div></details>`).join('');
   section.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
-      <div><div style="font-size:15px;font-weight:700;letter-spacing:.02em">MSFS SKY, LIGHTING & WEATHER MOD</div><div style="font-size:10px;opacity:.72">GeoFS標準レンダラー拡張 · v5.3.0</div></div>
+      <div><div style="font-size:15px;font-weight:700;letter-spacing:.02em">MSFS SKY, LIGHTING & WEATHER MOD</div><div style="font-size:10px;opacity:.72">GeoFS標準レンダラー拡張 · v5.4.0</div></div>
       <label class="mdl-switch mdl-js-switch mdl-js-ripple-effect" style="white-space:nowrap"><input id="gcm5-master" type="checkbox" class="mdl-switch__input" ${state.settings.enabled ? 'checked' : ''}><span class="mdl-switch__label">MOD ON</span></label>
     </div>
     <div style="margin-top:10px;padding:8px;border-left:3px solid #65a8d2;background:rgba(95,155,195,.10);font-size:11px">GeoFSのOptions → Graphics → Advanced内に統合。空色・太陽光・層状ヘイズは大気散乱計算そのものを拡張し、ライブ天候はGeoFS標準の雲量・風・太陽方向を引き継ぎます。</div>
@@ -865,7 +899,7 @@ function updateUiStatus() {
   const atm = window.geofs && geofs.fx && geofs.fx.atmosphere;
   const advanced = !!(geofs && geofs.preferences && geofs.preferences.graphics && geofs.preferences.graphics.advancedAtmosphere);
   const clouds = !!(geofs && geofs.preferences && geofs.preferences.graphics && geofs.preferences.graphics.volumetricClouds);
-  node.textContent = `大気シェーダー: ${state.ready ? 'v5.3拡張済み' : '待機中'} · GeoFS高度な大気: ${advanced ? 'ON' : 'OFF'} · ボリュメトリック雲: ${clouds ? 'ON' : 'OFF'} · 雲描画倍率: ${state.cloudRenderScale || '標準'}`;
+  node.textContent = `大気シェーダー: ${state.ready ? 'v5.4拡張済み' : '待機中'} · GeoFS高度な大気: ${advanced ? 'ON' : 'OFF'} · ボリュメトリック雲: ${clouds ? 'ON' : 'OFF'} · 雲描画倍率: ${state.cloudRenderScale || '標準'}`;
 }
 function enableNativeRequirements() {
   try {
@@ -893,14 +927,14 @@ function enableNativeRequirements() {
 
 function installCloudManagerCompatibility() {
   const cm = window.geofs && geofs.fx && geofs.fx.cloudManager;
-  if (!cm || cm.__msfsAtmosphereModV53) return;
+  if (!cm || cm.__msfsAtmosphereModV54) return;
   state.originalSpawnClouds = cm.spawnClouds;
   cm.spawnClouds = function () {
     const atm = window.geofs && geofs.fx && geofs.fx.atmosphere;
     if (state.active && atm && atm.volumetricClouds) return;
     if (typeof state.originalSpawnClouds === 'function') return state.originalSpawnClouds.apply(this, arguments);
   };
-  cm.__msfsAtmosphereModV53 = true;
+  cm.__msfsAtmosphereModV54 = true;
   const atm = window.geofs && geofs.fx && geofs.fx.atmosphere;
   if (atm && atm.volumetricClouds && typeof cm.destroyAllClouds === 'function') cm.destroyAllClouds();
 }
@@ -921,7 +955,7 @@ function initialize() {
     return true;
   } catch (error) {
     state.error = String(error && error.stack || error);
-    console.error('[GeoFS MSFS Sky Atmosphere Mod 5.3]', error);
+    console.error('[GeoFS MSFS Sky Atmosphere Mod 5.4]', error);
     const node = document.querySelector('#gcm5-status');
     if (node) node.textContent = '初期化エラー: ' + state.error;
     return false;
@@ -938,7 +972,7 @@ function disable() {
     const atm = window.geofs && geofs.fx && geofs.fx.atmosphere;
     if (atm && state.createWrapped) atm.create = state.originalCreate;
     const cm = window.geofs && geofs.fx && geofs.fx.cloudManager;
-    if (cm && state.originalSpawnClouds) { cm.spawnClouds = state.originalSpawnClouds; delete cm.__msfsAtmosphereModV53; }
+    if (cm && state.originalSpawnClouds) { cm.spawnClouds = state.originalSpawnClouds; delete cm.__msfsAtmosphereModV54; }
     const root = document.getElementById('geofs-msfs-sky-atmosphere-mod-v5');
     if (root) root.remove();
     if (state.observer) state.observer.disconnect();
@@ -960,5 +994,5 @@ if (document.body && window.MutationObserver) {
   });
   state.observer.observe(document.body, { childList:true, subtree:true });
 }
-log('v5.3 safe stage-uniform bridge installed; waiting for GeoFS rendering pipeline and native Options panel');
+log('v5.4 shader parser fix installed; waiting for GeoFS rendering pipeline and native Options panel');
 })();
