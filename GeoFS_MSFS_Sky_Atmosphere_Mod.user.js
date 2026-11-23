@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoFS MSFS Atmospheric Lighting & Sky Overhaul
 // @namespace    https://dya.jp/geofs-msfs-atmosphere-mod
-// @version      5.2.0
+// @version      5.3.0
 // @description  Native GeoFS Options integration with MSFS-inspired atmosphere, volumetric cloud and weather visual modules.
 // @match        https://www.geo-fs.com/geofs.php*
 // @match        https://geo-fs.com/geofs.php*
@@ -11,13 +11,13 @@
 (function () {
 'use strict';
 
-const KEY = '__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V52__';
-const MARK = 'GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V52';
+const KEY = '__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V53__';
+const MARK = 'GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V53';
 if (window[KEY]) return;
 
 // Stop the previous experimental build if it is still active.
 try {
-  for (const oldKey of ['__GEOFS_MSFS_CLOUD_ENGINE_V30__','__GEOFS_MSFS_ATMOSPHERE_REALISM_MOD_V40__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V50__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V51__']) {
+  for (const oldKey of ['__GEOFS_MSFS_CLOUD_ENGINE_V30__','__GEOFS_MSFS_ATMOSPHERE_REALISM_MOD_V40__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V50__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V51__','__GEOFS_MSFS_SKY_ATMOSPHERE_MOD_V52__']) {
     const old = window[oldKey];
     if (old && typeof old.disable === 'function') old.disable();
   }
@@ -67,17 +67,17 @@ function readStored() {
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 
 const state = window[KEY] = {
-  version: '5.2.0', active: false, ready: false, error: null,
+  version: '5.3.0', active: false, ready: false, error: null,
   originalShaders: null, originalCreate: null, originalDestroy: null,
-  originalPostProcessStage: null, originalSpawnClouds: null,
-  stageProxyInstalled: false, createWrapped: false, rendererRebuilt: false,
+  originalSpawnClouds: null,
+  stageUniformsInstalled: false, createWrapped: false, rendererRebuilt: false,
   cloudRenderScale: null, nativeUi: false, observer: null,
   settings: readStored(), presetName: 'MSFS-inspired Natural',
   saveSettings() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings)); } catch (_) {}
   }
 };
-const log = (...args) => console.info('[GeoFS MSFS Sky Atmosphere Mod 5]', ...args);
+const log = (...args) => console.info('[GeoFS MSFS Sky Atmosphere Mod 5.3]', ...args);
 
 const densityFunction = String.raw`float cloudDensity(vec3 p, vec3 wind, float lod, inout float heightRatio, float finalCoverage) {
     float stockHeightRatio = 0.0;
@@ -539,50 +539,51 @@ function patchShaders() {
   return true;
 }
 
-function installStageUniforms() {
-  if (!window.Cesium || !Cesium.PostProcessStage || state.stageProxyInstalled) return;
-  const OriginalStage = Cesium.PostProcessStage;
-  state.originalPostProcessStage = OriginalStage;
-  Cesium.PostProcessStage = new Proxy(OriginalStage, {
-    construct(target, args, newTarget) {
-      let options = args[0] || {};
-      if (typeof options.fragmentShader === 'string' && options.fragmentShader.includes(MARK)) {
-        if (state.settings.enabled && options.fragmentShader.includes('vec4 calculate_clouds(') && Number.isFinite(options.textureScale)) {
-          const quality = Number((window.geofs && geofs.fx && geofs.fx.atmosphere && geofs.fx.atmosphere.quality) || 7);
-          const boost = quality >= 7 ? 0.70 : (quality >= 5 ? 0.62 : options.textureScale);
-          if (boost > options.textureScale) options = Object.assign({}, options, { textureScale: boost });
-          state.cloudRenderScale = options.textureScale;
-        }
-        const get = key => () => state.settings[key];
-        const uniforms = Object.assign({}, options.uniforms || {}, {
-          modEnable: () => state.settings.enabled,
-          modMorphology: get('morphology'), modCloudOpacity: get('cloudOpacity'),
-          modDetail: get('detail'), modLayering: get('layering'), modCirrus: get('cirrus'),
-          modStratus: get('stratus'), modAnvil: get('anvil'), modFlatBases: get('flatBases'),
-          modTopVariation: get('topVariation'), modWindEvolution: get('windEvolution'),
-          modLighting: get('lighting'), modSilver: get('silverLining'), modPowder: get('powder'),
-          modSelfShadow: get('selfShadow'), modGroundShadow: get('groundShadow'),
-          modFlyThrough: get('flyThrough'), modLightning: get('lightning'),
-          modAerialPerspective: get('aerialPerspective'), modBoundaryFog: get('boundaryFog'),
-          modSkyRayleigh: get('skyRayleigh'), modSkyMie: get('skyMie'),
-          modRayleighScale: get('rayleighScale'), modMieScale: get('mieScale'),
-          modAtmoDensity: get('atmoDensity'), modOzone: get('ozone'), modMieG: get('mieG'),
-          modAerosolAngstrom: get('aerosolAngstrom'), modHazeBoundary: get('hazeBoundary'),
-          modHazeTopKm: get('hazeTopKm'), modHazeEdgeKm: get('hazeEdgeKm'),
-          modFreeHaze: get('freeHaze'), modBrownAbsorption: get('brownAbsorption'),
-          modWhiteBalance: get('whiteBalance'), modSkyExposure: get('skyExposure'),
-          modSkySaturation: get('skySaturation'), modSunHalo: get('sunHalo'),
-          modTwilight: get('twilight'), modHorizonGlow: get('horizonGlow'), modGlory: get('glory'),
-          modClock: () => performance.now() * 0.001
-        });
-        args[0] = Object.assign({}, options, { uniforms });
-      }
-      return Reflect.construct(target, args, newTarget);
-    }
-  });
-  state.stageProxyInstalled = true;
+function getModUniformBindings() {
+  const get = key => () => state.settings[key];
+  return {
+    modEnable: () => state.settings.enabled,
+    modMorphology: get('morphology'), modCloudOpacity: get('cloudOpacity'),
+    modDetail: get('detail'), modLayering: get('layering'), modCirrus: get('cirrus'),
+    modStratus: get('stratus'), modAnvil: get('anvil'), modFlatBases: get('flatBases'),
+    modTopVariation: get('topVariation'), modWindEvolution: get('windEvolution'),
+    modLighting: get('lighting'), modSilver: get('silverLining'), modPowder: get('powder'),
+    modSelfShadow: get('selfShadow'), modGroundShadow: get('groundShadow'),
+    modFlyThrough: get('flyThrough'), modLightning: get('lightning'),
+    modAerialPerspective: get('aerialPerspective'), modBoundaryFog: get('boundaryFog'),
+    modSkyRayleigh: get('skyRayleigh'), modSkyMie: get('skyMie'),
+    modRayleighScale: get('rayleighScale'), modMieScale: get('mieScale'),
+    modAtmoDensity: get('atmoDensity'), modOzone: get('ozone'), modMieG: get('mieG'),
+    modAerosolAngstrom: get('aerosolAngstrom'), modHazeBoundary: get('hazeBoundary'),
+    modHazeTopKm: get('hazeTopKm'), modHazeEdgeKm: get('hazeEdgeKm'),
+    modFreeHaze: get('freeHaze'), modBrownAbsorption: get('brownAbsorption'),
+    modWhiteBalance: get('whiteBalance'), modSkyExposure: get('skyExposure'),
+    modSkySaturation: get('skySaturation'), modSunHalo: get('sunHalo'),
+    modTwilight: get('twilight'), modHorizonGlow: get('horizonGlow'), modGlory: get('glory'),
+    modClock: () => performance.now() * 0.001
+  };
 }
 
+function injectStageUniforms(atmosphere) {
+  if (!atmosphere) return false;
+  const bindings = getModUniformBindings();
+  const stages = [atmosphere.atmospherePostProcessStage, atmosphere.cloudsPostProcessStage];
+  let injected = 0;
+  for (const stage of stages) {
+    // Cesium's exported PostProcessStage constructor may be a getter-only ES module export.
+    // GeoFS itself exposes each stage's mutable uniforms dictionary, so extend that instead.
+    if (!stage || !stage.uniforms || typeof stage.uniforms !== 'object') continue;
+    for (const [name, value] of Object.entries(bindings)) stage.uniforms[name] = value;
+    injected++;
+  }
+  state.stageUniformsInstalled = injected > 0;
+  return injected > 0;
+}
+
+function installStageUniforms() {
+  const atmosphere = window.geofs && geofs.fx && geofs.fx.atmosphere;
+  return injectStageUniforms(atmosphere);
+}
 function wrapAtmosphereCreate() {
   const atmosphere = window.geofs && geofs.fx && geofs.fx.atmosphere;
   if (!atmosphere || typeof atmosphere.create !== 'function' || state.createWrapped) return;
@@ -592,9 +593,9 @@ function wrapAtmosphereCreate() {
   const originalDestroy = state.originalDestroy;
   atmosphere.create = function () {
     patchShaders();
-    installStageUniforms();
     if (this.postProcessingStages && typeof originalDestroy === 'function') originalDestroy.call(this);
     const result = originalCreate.apply(this, arguments);
+    injectStageUniforms(this);
     state.rendererRebuilt = true;
     return result;
   };
@@ -608,6 +609,7 @@ function updateRenderer() {
       if (typeof state.originalDestroy === 'function') state.originalDestroy.call(atm);
       const args = [!!atm.advancedAtmosphere, Number.isFinite(atm.quality) ? atm.quality : 7, !!atm.volumetricClouds, !!atm.realTimeClouds, !!atm.retro];
       state.originalCreate.apply(atm, args);
+      injectStageUniforms(atm);
       return true;
     }
   } catch (error) { state.error = String(error); }
@@ -787,7 +789,7 @@ function buildNativeUI() {
   const groupsHtml = controlGroups.map((group, index) => `<details ${index === 0 ? 'open' : ''} style="margin-top:9px;border-top:1px solid rgba(130,160,185,.28);padding-top:7px"><summary style="font-weight:600;cursor:pointer;padding:5px 0">${htmlEscape(group.title)}</summary><div style="padding:4px 2px">${group.controls.map(([key,label,min,max,step]) => `<label style="display:block;margin:9px 0 7px"><span style="display:flex;justify-content:space-between;gap:10px"><span>${htmlEscape(label)}</span><output data-gcm5-out="${key}" style="font-variant-numeric:tabular-nums">${state.settings[key].toFixed(2)}</output></span><input data-gcm5-key="${key}" type="range" min="${min}" max="${max}" step="${step}" value="${state.settings[key]}" style="width:100%;accent-color:#4e9acb;touch-action:pan-y"></label>`).join('')}</div></details>`).join('');
   section.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
-      <div><div style="font-size:15px;font-weight:700;letter-spacing:.02em">MSFS SKY, LIGHTING & WEATHER MOD</div><div style="font-size:10px;opacity:.72">GeoFS標準レンダラー拡張 · v5.2.0</div></div>
+      <div><div style="font-size:15px;font-weight:700;letter-spacing:.02em">MSFS SKY, LIGHTING & WEATHER MOD</div><div style="font-size:10px;opacity:.72">GeoFS標準レンダラー拡張 · v5.3.0</div></div>
       <label class="mdl-switch mdl-js-switch mdl-js-ripple-effect" style="white-space:nowrap"><input id="gcm5-master" type="checkbox" class="mdl-switch__input" ${state.settings.enabled ? 'checked' : ''}><span class="mdl-switch__label">MOD ON</span></label>
     </div>
     <div style="margin-top:10px;padding:8px;border-left:3px solid #65a8d2;background:rgba(95,155,195,.10);font-size:11px">GeoFSのOptions → Graphics → Advanced内に統合。空色・太陽光・層状ヘイズは大気散乱計算そのものを拡張し、ライブ天候はGeoFS標準の雲量・風・太陽方向を引き継ぎます。</div>
@@ -863,7 +865,7 @@ function updateUiStatus() {
   const atm = window.geofs && geofs.fx && geofs.fx.atmosphere;
   const advanced = !!(geofs && geofs.preferences && geofs.preferences.graphics && geofs.preferences.graphics.advancedAtmosphere);
   const clouds = !!(geofs && geofs.preferences && geofs.preferences.graphics && geofs.preferences.graphics.volumetricClouds);
-  node.textContent = `大気シェーダー: ${state.ready ? 'v5拡張済み' : '待機中'} · GeoFS高度な大気: ${advanced ? 'ON' : 'OFF'} · ボリュメトリック雲: ${clouds ? 'ON' : 'OFF'} · 雲描画倍率: ${state.cloudRenderScale || '標準'}`;
+  node.textContent = `大気シェーダー: ${state.ready ? 'v5.3拡張済み' : '待機中'} · GeoFS高度な大気: ${advanced ? 'ON' : 'OFF'} · ボリュメトリック雲: ${clouds ? 'ON' : 'OFF'} · 雲描画倍率: ${state.cloudRenderScale || '標準'}`;
 }
 function enableNativeRequirements() {
   try {
@@ -891,14 +893,14 @@ function enableNativeRequirements() {
 
 function installCloudManagerCompatibility() {
   const cm = window.geofs && geofs.fx && geofs.fx.cloudManager;
-  if (!cm || cm.__msfsAtmosphereModV52) return;
+  if (!cm || cm.__msfsAtmosphereModV53) return;
   state.originalSpawnClouds = cm.spawnClouds;
   cm.spawnClouds = function () {
     const atm = window.geofs && geofs.fx && geofs.fx.atmosphere;
     if (state.active && atm && atm.volumetricClouds) return;
     if (typeof state.originalSpawnClouds === 'function') return state.originalSpawnClouds.apply(this, arguments);
   };
-  cm.__msfsAtmosphereModV52 = true;
+  cm.__msfsAtmosphereModV53 = true;
   const atm = window.geofs && geofs.fx && geofs.fx.atmosphere;
   if (atm && atm.volumetricClouds && typeof cm.destroyAllClouds === 'function') cm.destroyAllClouds();
 }
@@ -919,7 +921,7 @@ function initialize() {
     return true;
   } catch (error) {
     state.error = String(error && error.stack || error);
-    console.error('[GeoFS MSFS Sky Atmosphere Mod 5]', error);
+    console.error('[GeoFS MSFS Sky Atmosphere Mod 5.3]', error);
     const node = document.querySelector('#gcm5-status');
     if (node) node.textContent = '初期化エラー: ' + state.error;
     return false;
@@ -936,8 +938,7 @@ function disable() {
     const atm = window.geofs && geofs.fx && geofs.fx.atmosphere;
     if (atm && state.createWrapped) atm.create = state.originalCreate;
     const cm = window.geofs && geofs.fx && geofs.fx.cloudManager;
-    if (cm && state.originalSpawnClouds) { cm.spawnClouds = state.originalSpawnClouds; delete cm.__msfsAtmosphereModV52; }
-    if (state.stageProxyInstalled && window.Cesium) Cesium.PostProcessStage = state.originalPostProcessStage;
+    if (cm && state.originalSpawnClouds) { cm.spawnClouds = state.originalSpawnClouds; delete cm.__msfsAtmosphereModV53; }
     const root = document.getElementById('geofs-msfs-sky-atmosphere-mod-v5');
     if (root) root.remove();
     if (state.observer) state.observer.disconnect();
@@ -959,5 +960,5 @@ if (document.body && window.MutationObserver) {
   });
   state.observer.observe(document.body, { childList:true, subtree:true });
 }
-log('waiting for GeoFS rendering pipeline and native Options panel');
+log('v5.3 safe stage-uniform bridge installed; waiting for GeoFS rendering pipeline and native Options panel');
 })();
